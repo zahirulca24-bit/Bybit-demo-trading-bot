@@ -9,7 +9,7 @@ export interface ScannerTradeExecutor {
   activePositions: any[];
   currentPrices: Record<string, number>;
   settings?: { maxPositions?: number };
-  canOpenSymbol: (symbol: string) => { allowed: boolean; reason?: string };
+  canOpenSymbol: (symbol: string) => Promise<{ allowed: boolean; reason?: string }>;
   executeScannerEntry: (
     symbol: string,
     side: "Buy" | "Sell",
@@ -221,7 +221,7 @@ export class MarketScanner {
 
   private async handleAutoTradeTriggers(signals: ScannedMarketItem[]) {
     for (const item of signals) {
-      const risk = this.executor.canOpenSymbol(item.symbol);
+      const risk = await this.executor.canOpenSymbol(item.symbol);
       if (!risk.allowed) {
         this.emitter.log(`[Scanner] ${item.symbol} skipped: ${risk.reason || "risk rule blocked entry"}`);
         continue;
