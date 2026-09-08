@@ -1,14 +1,35 @@
+import { useEffect, useState } from "react";
 import { History } from "lucide-react";
 import { Position, TradeHistory } from "../types";
 
 interface HistoryPageProps {
   history: TradeHistory[];
-  walletBalance?: number;
-  positions?: Position[];
   startingBalance?: number;
 }
 
-export function HistoryPage({ history, walletBalance = 0, positions = [], startingBalance = 1000 }: HistoryPageProps) {
+export function HistoryPage({ history, startingBalance = 1000 }: HistoryPageProps) {
+  const [walletBalance, setWalletBalance] = useState(0);
+  const [positions, setPositions] = useState<Position[]>([]);
+
+  useEffect(() => {
+    const refreshAccount = async () => {
+      try {
+        const [balanceRes, positionsRes] = await Promise.all([
+          fetch("/api/balance").then(r => r.json()).catch(() => ({ success: false })),
+          fetch("/api/positions/active").then(r => r.json()).catch(() => ({ success: false })),
+        ]);
+        if (balanceRes.success) setWalletBalance(Number(balanceRes.balance || 0));
+        if (positionsRes.success && Array.isArray(positionsRes.positions)) setPositions(positionsRes.positions);
+      } catch {
+        // Keep the last good snapshot if a refresh temporarily fails.
+      }
+    };
+
+    refreshAccount();
+    const timer = setInterval(refreshAccount, 5000);
+    return () => clearInterval(timer);
+  }, []);
+
   const closedTrades = history.filter(t => typeof t.pnl === 'number');
   const totalTrades = closedTrades.length;
   const winningTrades = closedTrades.filter(t => (t.pnl || 0) > 0).length;
@@ -22,7 +43,7 @@ export function HistoryPage({ history, walletBalance = 0, positions = [], starti
     <div className="space-y-6">
       <header className="pb-4 border-b border-neutral-800">
         <h1 className="text-3xl font-bold tracking-tight text-white mb-2">Trade History & Account Reconciliation</h1>
-        <p className="text-neutral-400">Bybit closed-PnL history plus wallet/equity reconciliation.</p>
+        <p className="text-neutral-400">Bybit closed-PnL history plus live wallet/equity reconciliation.</p>
       </header>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -51,7 +72,7 @@ export function HistoryPage({ history, walletBalance = 0, positions = [], starti
           <p className={`text-3xl font-bold ${accountPnlVsStart >= 0 ? 'text-green-500' : 'text-red-500'}`}>
             {accountPnlVsStart >= 0 ? '+' : ''}{accountPnlVsStart.toFixed(2)}
           </p>
-          <p className="text-xs text-neutral-500 mt-2">Uses wallet + current unrealized PnL</p>
+          <p className="text-xs text-neutral-500 mt-2">Wallet + unrealized minus starting balance</p>
         </div>
       </div>
 
