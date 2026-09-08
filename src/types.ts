@@ -36,6 +36,7 @@ export interface Position {
   liqPrice?: string;
   trailingStopPrice?: number;
   peakPrice?: number;
+  createdTime?: number;
 }
 
 export interface TradeHistory {
@@ -136,6 +137,49 @@ export interface Scanner5mResult {
   isVolumeConfirmed: boolean; isVolumeModerate: boolean; trend: "BULLISH" | "BEARISH" | "NEUTRAL"; signal: "LONG" | "SHORT" | "NONE"; grade: "GRADE_A" | "GRADE_B" | "NONE"; signalReason: string; candleTime: number;
 }
 
-export interface ClosedTradeAuditItem { id: string; symbol: string; side: "LONG" | "SHORT"; entryPrice: number; exitPrice: number; qty: string; pnl: number; pnlPercent: number; exitTrigger: string; time: number; slDiagnosticReason?: string; }
-export interface SlAuditSummary { primarySlCause: string; worstPerformingSymbol: string; slCountForWorst: number; averageTimeToSlSeconds: number; strategyFeedbackNote: string; totalLossUsdt: number; }
-export interface DailyTradeAnalytics { todayOpenedCount: number; todayClosedCount: number; activePositionsCount: number; maxSlots: number; tpHitCount: number; trailingStopCount: number; slHitCount: number; manualCloseCount: number; breakEvenCount: number; slAudit: SlAuditSummary; closedTrades: ClosedTradeAuditItem[]; }
+export interface ClosedTradeAuditItem {
+  id: string;
+  symbol: string;
+  side: "LONG" | "SHORT";
+  entryPrice: number;
+  exitPrice: number;
+  qty: string;
+  pnl: number;
+  pnlPercent: number;
+  exitTrigger: string;
+  time: number;
+  openedTime?: number;
+  slDiagnosticReason?: string;
+}
+
+export interface SlAuditSummary {
+  primarySlCause: string;
+  worstPerformingSymbol: string;
+  slCountForWorst: number;
+  averageTimeToSlSeconds: number;
+  strategyFeedbackNote: string;
+  totalLossUsdt: number;
+}
+
+export interface DailyTradeAnalytics {
+  tradingDay: "UTC";
+  tradingDayStartUtc: number;
+  windowEndUtc: number;
+  todayOpenedCount: number;
+  todayClosedCount: number;
+  winningTradesCount: number;
+  losingTradesCount: number;
+  activePositionsCount: number;
+  maxSlots: number;
+  tpHitCount: number;
+  trailingStopCount: number;
+  slHitCount: number;
+  manualCloseCount: number;
+  otherExitCount: number;
+  breakEvenCount: number;
+  realizedPnlToday: number;
+  unrealizedPnlToday: number;
+  netDailyPnl: number;
+  slAudit: SlAuditSummary;
+  closedTrades: ClosedTradeAuditItem[];
+}
