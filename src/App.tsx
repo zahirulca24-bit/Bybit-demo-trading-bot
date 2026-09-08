@@ -36,7 +36,6 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Dynamic Market Scanner State
   const [scannerState, setScannerState] = useState<ScannerState>({
     markets: [],
     autoTrade: true,
@@ -46,7 +45,6 @@ export default function App() {
     topSymbols: [],
   });
 
-  // Throttled price buffer for React state to prevent UI freezing
   const pendingPricesRef = useRef<Record<string, number>>({});
   const lastPriceUpdateRef = useRef<number>(0);
   const priceTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -67,7 +65,6 @@ export default function App() {
   };
 
   useEffect(() => {
-    // Initialize Socket.io connection with fallback transports and auto-reconnect
     const newSocket = io({
       path: "/socket.io",
       transports: ["websocket", "polling"],
@@ -94,75 +91,24 @@ export default function App() {
     newSocket.on("reconnect_attempt", () => {
       setConnectionStatus("reconnecting");
     });
-    
-    newSocket.on("bot-status", (data: { running: boolean }) => {
-      setIsBotRunning(data.running);
-    });
-    
-    newSocket.on("price-update", (data: Record<string, number>) => {
-      handleThrottledPrices(data);
-    });
 
-    newSocket.on("ticker:update", (data: Record<string, number>) => {
-      handleThrottledPrices(data);
-    });
-
-    newSocket.on("positions-update", (data: Position[]) => {
-      setPositions(data);
-    });
-
-    newSocket.on("position:update", (data: Position[]) => {
-      setPositions(data);
-    });
-
-    newSocket.on("balance-update", (data: { balance: string }) => {
-      if (data?.balance) setBalance(data.balance);
-    });
-
-    newSocket.on("wallet:update", (data: { balance: string }) => {
-      if (data?.balance) setBalance(data.balance);
-    });
-
-    newSocket.on("technicals-update", (data: Record<string, Technicals>) => {
-      setTechnicals(data);
-    });
-
-    newSocket.on("watchlist-update", (data: string[]) => {
-      setWatchlist(data);
-    });
-
-    newSocket.on("kline-update", (data: KlineUpdatePayload) => {
-      setLatestKlineUpdate(data);
-    });
-
-    newSocket.on("kline:update", (data: KlineUpdatePayload) => {
-      setLatestKlineUpdate(data);
-    });
-
-    newSocket.on("scanner-update", (data: ScannerState) => {
-      if (data) setScannerState(data);
-    });
-
-    newSocket.on("scanner:update", (data: ScannerState) => {
-      if (data) setScannerState(data);
-    });
-
-    newSocket.on("settings-update", (data: any) => {
-      setSettings(data);
-    });
-
-    newSocket.on("log", (message: string) => {
-      // Cap logs strictly at latest 50 entries to avoid memory leaks
-      setLogs((prev) => [...prev, message].slice(-50));
-    });
-    
-    newSocket.on("trade-update", (trade: any) => {
-      fetchData();
-    });
-
-    newSocket.on("execution:update", (trade: any) => {
-      fetchData();
-    });
+    newSocket.on("bot-status", (data: { running: boolean }) => setIsBotRunning(data.running));
+    newSocket.on("price-update", (data: Record<string, number>) => handleThrottledPrices(data));
+    newSocket.on("ticker:update", (data: Record<string, number>) => handleThrottledPrices(data));
+    newSocket.on("positions-update", (data: Position[]) => setPositions(data));
+    newSocket.on("position:update", (data: Position[]) => setPositions(data));
+    newSocket.on("balance-update", (data: { balance: string }) => { if (data?.balance) setBalance(data.balance); });
+    newSocket.on("wallet:update", (data: { balance: string }) => { if (data?.balance) setBalance(data.balance); });
+    newSocket.on("technicals-update", (data: Record<string, Technicals>) => setTechnicals(data));
+    newSocket.on("watchlist-update", (data: string[]) => setWatchlist(data));
+    newSocket.on("kline-update", (data: KlineUpdatePayload) => setLatestKlineUpdate(data));
+    newSocket.on("kline:update", (data: KlineUpdatePayload) => setLatestKlineUpdate(data));
+    newSocket.on("scanner-update", (data: ScannerState) => { if (data) setScannerState(data); });
+    newSocket.on("scanner:update", (data: ScannerState) => { if (data) setScannerState(data); });
+    newSocket.on("settings-update", (data: any) => setSettings(data));
+    newSocket.on("log", (message: string) => setLogs((prev) => [...prev, message].slice(-50)));
+    newSocket.on("trade-update", () => fetchData());
+    newSocket.on("execution:update", () => fetchData());
 
     return () => {
       if (priceTimerRef.current) clearTimeout(priceTimerRef.current);
@@ -173,12 +119,12 @@ export default function App() {
   const fetchData = async () => {
     setError(null);
     try {
-      const [balanceRes, positionsRes, watchlistRes, settingsRes, historyRes, techRes, botRes, scannerRes] = await Promise.all([
+      const [balanceRes, positionsRes, watchlistRes, settingsRes, summaryRes, techRes, botRes, scannerRes] = await Promise.all([
         fetch("/api/balance").then(r => r.json()),
         fetch("/api/positions").then(r => r.json()),
         fetch("/api/watchlist").then(r => r.json()),
         fetch("/api/settings").then(r => r.json()),
-        fetch("/api/history").then(r => r.json()),
+        fetch("/api/trading-summary?limit=100").then(r => r.json()).catch(() => ({ success: false })),
         fetch("/api/technicals").then(r => r.json()),
         fetch('/api/bot/status').then(r => r.json()).catch(() => ({ success: true, running: true, circuitBreaker: false })),
         fetch("/api/scanner/state").then(r => r.json()).catch(() => ({ success: false })),
@@ -188,11 +134,28 @@ export default function App() {
       if (positionsRes.success) setPositions(positionsRes.positions);
       if (watchlistRes.success) setWatchlist(watchlistRes.watchlist);
       if (settingsRes.success) setSettings(settingsRes.settings);
-      if (historyRes.success) setHistory(historyRes.history);
+
+      if (summaryRes.success && Array.isArray(summaryRes.closedTrades)) {
+        const normalizedHistory: TradeHistory[] = summaryRes.closedTrades.map((trade: any) => ({
+          id: String(trade.orderId || `${trade.symbol}-${trade.execTime}`),
+          symbol: String(trade.symbol || ""),
+          side: trade.side === "Sell" ? "Sell" : "Buy",
+          entryPrice: Number(trade.entryPrice || 0),
+          exitPrice: Number(trade.exitPrice || 0),
+          size: Number(trade.qty || 0),
+          qty: trade.qty ?? "0",
+          pnl: Number(trade.closedPnl || 0),
+          pnlPercent: Number(trade.closedPnlPercent || 0),
+          reason: trade.orderType || "Bybit Closed PnL",
+          time: Number(trade.execTime || 0),
+        }));
+        setHistory(normalizedHistory);
+      }
+
       if (techRes.success) setTechnicals(techRes.technicals);
       if (botRes?.success && typeof botRes.running === "boolean") setIsBotRunning(botRes.running);
+      if (botRes?.success && typeof botRes.circuitBreaker === "boolean") setIsCircuitBreaker(botRes.circuitBreaker);
       if (scannerRes?.success && scannerRes.state) setScannerState(scannerRes.state);
-      
       if (!balanceRes.success) setError(balanceRes.error);
     } catch (err: any) {
       setError("Failed to fetch data from server");
@@ -208,11 +171,8 @@ export default function App() {
         body: JSON.stringify({ symbol }),
       });
       const data = await res.json();
-      if (!data.success) {
-        setError(data.message || `Failed to close position for ${symbol}`);
-      } else {
-        await fetchData();
-      }
+      if (!data.success) setError(data.message || `Failed to close position for ${symbol}`);
+      else await fetchData();
     } catch (err: any) {
       setError(`Error submitting close order for ${symbol}`);
     }
@@ -228,12 +188,9 @@ export default function App() {
         body: JSON.stringify({ symbol, qty: symbol.includes("BTC") ? "0.001" : undefined }),
       });
       const data = await res.json();
-      if (!data.success) {
-        setError(data.message || "Failed to execute manual test order");
-      } else {
-        await fetchData();
-      }
-    } catch (err: any) {
+      if (!data.success) setError(data.message || "Failed to execute manual test order");
+      else await fetchData();
+    } catch {
       setError("Error submitting test order to Bybit");
     } finally {
       setIsLoading(false);
@@ -248,10 +205,8 @@ export default function App() {
         body: JSON.stringify({ autoTrade }),
       });
       const data = await res.json();
-      if (data.success) {
-        setScannerState((prev) => ({ ...prev, autoTrade: data.autoTrade }));
-      }
-    } catch (e) {
+      if (data.success) setScannerState((prev) => ({ ...prev, autoTrade: data.autoTrade }));
+    } catch {
       console.error("Failed to toggle scanner auto-trade");
     }
   };
@@ -261,10 +216,8 @@ export default function App() {
       setScannerState((prev) => ({ ...prev, isScanning: true }));
       const res = await fetch("/api/scanner/scan-now", { method: "POST" });
       const data = await res.json();
-      if (data.success && data.state) {
-        setScannerState(data.state);
-      }
-    } catch (e) {
+      if (data.success && data.state) setScannerState(data.state);
+    } catch {
       console.error("Failed to scan markets");
     } finally {
       setScannerState((prev) => ({ ...prev, isScanning: false }));
@@ -276,10 +229,8 @@ export default function App() {
       setScannerState((prev) => ({ ...prev, isScanning: true }));
       const res = await fetch("/api/scanner/refresh-markets", { method: "POST" });
       const data = await res.json();
-      if (data.success && data.state) {
-        setScannerState(data.state);
-      }
-    } catch (e) {
+      if (data.success && data.state) setScannerState(data.state);
+    } catch {
       console.error("Failed to refresh market rankings");
     } finally {
       setScannerState((prev) => ({ ...prev, isScanning: false }));
@@ -294,17 +245,15 @@ export default function App() {
         body: JSON.stringify({ maxConcurrent }),
       });
       const data = await res.json();
-      if (data.success) {
-        setScannerState((prev) => ({ ...prev, maxConcurrent: data.maxConcurrent }));
-      }
-    } catch (e) {
+      if (data.success) setScannerState((prev) => ({ ...prev, maxConcurrent: data.maxConcurrent }));
+    } catch {
       console.error("Failed to set max concurrent slots");
     }
   };
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, 10000); // Poll every 10s
+    const interval = setInterval(fetchData, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -315,10 +264,8 @@ export default function App() {
       const endpoint = isBotRunning ? "/api/bot/stop" : "/api/bot/start";
       const res = await fetch(endpoint, { method: "POST" });
       const data = await res.json();
-      if (!data.success) {
-        setError(data.message);
-      }
-    } catch (err) {
+      if (!data.success) setError(data.message);
+    } catch {
       setError("Failed to toggle bot");
     } finally {
       setIsLoading(false);
@@ -327,18 +274,16 @@ export default function App() {
 
   const toggleWatchlist = async (symbol: string, remove: boolean) => {
     try {
-       const endpoint = remove ? "/api/watchlist/remove" : "/api/watchlist/add";
-       const res = await fetch(endpoint, {
-         method: "POST",
-         headers: { 'Content-Type': 'application/json' },
-         body: JSON.stringify({ symbol })
-       });
-       const data = await res.json();
-       if (data.success) {
-          setWatchlist(data.watchlist);
-       }
-    } catch (err) {
-       console.error("Failed to update watchlist");
+      const endpoint = remove ? "/api/watchlist/remove" : "/api/watchlist/add";
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol })
+      });
+      const data = await res.json();
+      if (data.success) setWatchlist(data.watchlist);
+    } catch {
+      console.error("Failed to update watchlist");
     }
   };
 
@@ -351,7 +296,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ settings: newSettings })
       });
-    } catch (err) {
+    } catch {
       console.error("Failed to save settings");
     }
   };
@@ -377,7 +322,7 @@ export default function App() {
           )}
 
           {activeTab === 'terminal' && (
-            <TerminalPage 
+            <TerminalPage
               balance={balance}
               isBotRunning={isBotRunning}
               isCircuitBreaker={isCircuitBreaker}
@@ -405,7 +350,7 @@ export default function App() {
           )}
 
           {activeTab === 'strategy' && (
-            <StrategyPage 
+            <StrategyPage
               watchlist={watchlist}
               technicals={technicals}
               toggleWatchlist={toggleWatchlist}
@@ -422,14 +367,10 @@ export default function App() {
             />
           )}
 
-          {activeTab === 'history' && (
-            <HistoryPage 
-              history={history}
-            />
-          )}
+          {activeTab === 'history' && <HistoryPage history={history} />}
 
           {activeTab === 'settings' && (
-            <SettingsPage 
+            <SettingsPage
               settings={settings}
               updateSetting={updateSetting}
               systemLogs={logs}
@@ -440,4 +381,3 @@ export default function App() {
     </div>
   );
 }
-
