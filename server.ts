@@ -11,6 +11,7 @@ import { TradingEngine } from "./src/engine/TradingEngine";
 import { MarketScanner5m, Scanner5mSignal } from "./src/engine/MarketScanner5m";
 import { SixGateFilteringPipeline } from "./src/engine/SixGateFilteringPipeline";
 import { initDatabase, dbGetClosedTrades } from "./src/db";
+import { getUtcTradingDayWindow, normalizeTimestampMs } from "./src/utils/utcTradingDay";
 
 dotenv.config();
 
@@ -335,6 +336,7 @@ async function startServer() {
             stopLoss: pos.stopLoss || "0",
             takeProfit: pos.takeProfit || "0",
             liqPrice: pos.liqPrice || "0",
+            createdTime: normalizeTimestampMs(pos.createdTime || pos.updatedTime),
           };
         });
 
@@ -473,7 +475,8 @@ async function startServer() {
           closedPnlPercent: item.avgEntryPrice && parseFloat(item.avgEntryPrice) > 0
             ? ((parseFloat(item.avgExitPrice || "0") - parseFloat(item.avgEntryPrice)) / parseFloat(item.avgEntryPrice)) * 100 * (item.side === "Buy" ? -1 : 1)
             : 0,
-          execTime: parseInt(item.updatedTime || item.createdTime || "0", 10),
+          execTime: normalizeTimestampMs(item.updatedTime || item.execTime || item.createdTime),
+          openedTime: normalizeTimestampMs(item.createdTime),
           orderType: item.orderType,
         };
       });
@@ -495,7 +498,7 @@ async function startServer() {
         qty: parseFloat(exec.execQty || "0"),
         fee: parseFloat(exec.execFee || "0"),
         feeRate: parseFloat(exec.feeRate || "0"),
-        execTime: parseInt(exec.execTime || "0", 10),
+        execTime: normalizeTimestampMs(exec.execTime),
         execType: exec.execType,
         isMaker: exec.isMaker,
       }));
@@ -525,178 +528,167 @@ async function startServer() {
     }
   });
 
-  // 3.4 Daily Trade Analytics & SL Diagnostics Endpoint
+  // 3.4 UTC Daily Trade Analytics. This is independent from Performance Baseline resets.
   app.get("/api/analytics/daily", async (req, res) => {
     try {
-      // 1. Fetch live open positions
-      const posRes = await bybit.getPositionInfo({ category: "linear", settleCoin: "USDT" });
+      const nowMs = Date.now();
+      const { startMs: dayStartMs, endMs: dayEndMs } = getUtcTradingDayWindow(nowMs);
+
+      const [posRes, pnlResponse] = await Promise.all([
+        bybit.getPositionInfo({ category: "linear", settleCoin: "USDT" }),
+        bybit.getClosedPnL({ category: "linear", limit: 100 }),
+      ]);
+
       const openPositions = (posRes.result?.list || []).filter((p: any) => parseFloat(p.size || "0") > 0);
       const activePositionsCount = openPositions.length;
-      const maxSlots = engine.settings.maxPositions || 5;
-
-      // 2. Fetch Closed PnL history
-      const pnlResponse = await bybit.getClosedPnL({ category: "linear", limit: 50 });
+      const maxSlots = engine.settings.maxPositions || 3;
       const rawClosedList = pnlResponse.result?.list || [];
-
-      // Combine with local engine history for trade reasons
       const engineHistory = engine.getHistory() || [];
 
-      // Determine today's start in UTC (00:00:00 UTC)
-      const now = new Date();
-      const todayStartUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+      const closedTodayRaw = rawClosedList.filter((item: any) => {
+        const closeTime = normalizeTimestampMs(item.updatedTime || item.execTime || item.createdTime);
+        return closeTime >= dayStartMs && closeTime <= dayEndMs;
+      });
 
-      let tpHitCount = 0;
-      let trailingStopCount = 0;
-      let slHitCount = 0;
-      let manualCloseCount = 0;
-      let breakEvenCount = 0;
+      type ExitCategory = "TP" | "SL" | "TRAILING" | "MANUAL" | "OTHER";
+      const classifyExit = (reasonValue: unknown): { category: ExitCategory; label: string } => {
+        const reason = String(reasonValue || "").trim();
+        const normalized = reason.toLowerCase();
 
-      // Track SL details for failure analysis
-      const slCountsBySymbol: Record<string, number> = {};
-      const slDurationsSeconds: number[] = [];
-      const slCauses: Record<string, number> = {
-        "5m Volatility Spike / Spread Wick": 0,
-        "Orderbook Spread Compression": 0,
-        "Sudden High-Volume Trend Reversal": 0,
-        "Premature Entry on False Breakout": 0,
+        if (normalized.includes("trailing")) return { category: "TRAILING", label: "Trailing Stop" };
+        if (normalized.includes("take profit") || /(^|\b)tp(\b|\d)/i.test(reason)) {
+          return { category: "TP", label: "Take Profit" };
+        }
+        if (normalized.includes("stop loss") || /(^|\b)sl(\b|\d)/i.test(reason)) {
+          return { category: "SL", label: "Stop Loss" };
+        }
+        if (normalized.includes("manual") || normalized.includes("panic")) {
+          return { category: "MANUAL", label: "Manual Close" };
+        }
+        return { category: "OTHER", label: reason && normalized !== "bybit closed pnl" ? reason : "Unknown / Other" };
       };
 
-      const auditTrades: any[] = rawClosedList.map((item: any) => {
-        const pnl = parseFloat(item.closedPnl || "0");
-        const entryPrice = parseFloat(item.avgEntryPrice || "0");
-        const exitPrice = parseFloat(item.avgExitPrice || "0");
-        const execTime = parseInt(item.updatedTime || item.createdTime || "0", 10);
+      const dailyCounters = {
+        tp: 0,
+        sl: 0,
+        trailing: 0,
+        manual: 0,
+        other: 0,
+        wins: 0,
+        losses: 0,
+      };
+
+      const slCountsBySymbol: Record<string, number> = {};
+
+      const todayTrades = closedTodayRaw.map((item: any) => {
+        const pnl = Number(item.closedPnl || 0);
+        const entryPrice = Number(item.avgEntryPrice || 0);
+        const exitPrice = Number(item.avgExitPrice || 0);
+        const closeTime = normalizeTimestampMs(item.updatedTime || item.execTime || item.createdTime);
+        const openedTime = normalizeTimestampMs(item.createdTime);
         const pnlPercent = entryPrice > 0
           ? ((exitPrice - entryPrice) / entryPrice) * 100 * (item.side === "Buy" ? -1 : 1)
           : 0;
 
-        // Correlate with engine history
-        const matchedLocal = engineHistory.find((h: any) => h.symbol === item.symbol && Math.abs((h.time || 0) - execTime) < 30000);
-        
-        let exitTrigger = "Manual Close";
-        let slDiagnosticReason: string | undefined = undefined;
+        const matchedLocal = engineHistory.find((h: any) =>
+          h.symbol === item.symbol && Math.abs(normalizeTimestampMs(h.time) - closeTime) < 30_000
+        );
+        const classified = classifyExit(matchedLocal?.reason);
 
-        if (matchedLocal?.reason) {
-          if (matchedLocal.reason.includes("Trailing Stop")) {
-            exitTrigger = "Trailing Stop";
-            trailingStopCount++;
-          } else if (matchedLocal.reason.includes("TP") || matchedLocal.reason.includes("Take Profit")) {
-            exitTrigger = `TP1 (+${engine.settings.tpPercent}%)`;
-            tpHitCount++;
-          } else if (matchedLocal.reason.includes("SL") || matchedLocal.reason.includes("Stop Loss")) {
-            exitTrigger = `Hard SL (-${engine.settings.slPercent}%)`;
-            slHitCount++;
-          } else {
-            exitTrigger = matchedLocal.reason;
-            manualCloseCount++;
-          }
-        } else {
-          // Heuristic based on PnL percent
-          if (pnlPercent >= 1.2) {
-            exitTrigger = `TP1 (+${engine.settings.tpPercent}%)`;
-            tpHitCount++;
-          } else if (pnlPercent <= -0.85) {
-            exitTrigger = `Hard SL (-${engine.settings.slPercent}%)`;
-            slHitCount++;
-          } else if (pnlPercent > 0.2 && pnlPercent < 1.2) {
-            exitTrigger = "Trailing Stop";
-            trailingStopCount++;
-          } else if (Math.abs(pnlPercent) <= 0.2) {
-            exitTrigger = "Break-Even SL";
-            breakEvenCount++;
-          } else {
-            exitTrigger = "Manual Close";
-            manualCloseCount++;
-          }
-        }
-
-        // If it's a stop loss or loss trade, diagnose root cause
-        if (pnl < 0 || exitTrigger.includes("SL")) {
+        if (classified.category === "TP") dailyCounters.tp++;
+        else if (classified.category === "SL") {
+          dailyCounters.sl++;
           slCountsBySymbol[item.symbol] = (slCountsBySymbol[item.symbol] || 0) + 1;
-          const duration = Math.floor(Math.random() * 120) + 45; // seconds
-          slDurationsSeconds.push(duration);
-
-          if (duration < 60) {
-            slDiagnosticReason = "Fast Spread Wick (Gate 2 Spread filter adjustment recommended)";
-            slCauses["5m Volatility Spike / Spread Wick"]++;
-          } else if (pnlPercent <= -1.2) {
-            slDiagnosticReason = "Orderbook Liquidity Sweep / Slippage";
-            slCauses["Orderbook Spread Compression"]++;
-          } else {
-            slDiagnosticReason = "False 5m Breakout / High Volatility Noise";
-            slCauses["Premature Entry on False Breakout"]++;
-          }
         }
+        else if (classified.category === "TRAILING") dailyCounters.trailing++;
+        else if (classified.category === "MANUAL") dailyCounters.manual++;
+        else dailyCounters.other++;
+
+        if (pnl > 0) dailyCounters.wins++;
+        else if (pnl < 0) dailyCounters.losses++;
 
         return {
-          id: item.orderId || `close-${execTime}`,
+          id: String(item.orderId || `close-${item.symbol}-${closeTime}`),
           symbol: item.symbol,
-          side: item.side === "Buy" ? "SHORT" : "LONG", // Closed side is opposite of position
+          side: item.side === "Buy" ? "SHORT" : "LONG",
           entryPrice,
           exitPrice,
-          qty: item.qty || "1",
+          qty: String(item.qty || "0"),
           pnl,
           pnlPercent,
-          exitTrigger,
-          time: execTime || Date.now(),
-          slDiagnosticReason,
+          exitTrigger: classified.label,
+          time: closeTime,
+          openedTime,
         };
       });
 
-      // Filter for today's trades (or fallback to recent if fewer than 3 today for display)
-      const todayTrades = auditTrades.filter((t) => t.time >= todayStartUtc);
-      const displayTrades = todayTrades.length > 0 ? todayTrades : auditTrades.slice(0, 15);
+      // Count actual positions/trades opened during this UTC day. Do not infer opened count
+      // from closed count + active positions, because yesterday's active positions can carry overnight.
+      const openedTradeKeys = new Set<string>();
+      for (const item of closedTodayRaw) {
+        const openedTime = normalizeTimestampMs(item.createdTime);
+        if (openedTime >= dayStartMs && openedTime <= dayEndMs) {
+          openedTradeKeys.add(`${item.symbol}:${item.side}:${openedTime}`);
+        }
+      }
+      for (const pos of openPositions) {
+        const openedTime = normalizeTimestampMs(pos.createdTime || pos.updatedTime);
+        if (openedTime >= dayStartMs && openedTime <= dayEndMs) {
+          openedTradeKeys.add(`${pos.symbol}:${pos.side}:${openedTime}`);
+        }
+      }
 
-      // Identify Worst Performing Symbol for SL Audit
+      const realizedPnlToday = todayTrades.reduce((sum: number, t: any) => sum + Number(t.pnl || 0), 0);
+      const unrealizedPnlToday = openPositions.reduce((sum: number, p: any) => sum + Number(p.unrealisedPnl || 0), 0);
+      const netDailyPnl = realizedPnlToday + unrealizedPnlToday;
+      const exitBreakdownTotal = dailyCounters.tp + dailyCounters.sl + dailyCounters.trailing + dailyCounters.manual + dailyCounters.other;
+
+      // By construction every closed-today trade has exactly one mutually exclusive category.
+      if (exitBreakdownTotal !== todayTrades.length) {
+        throw new Error(`Daily exit breakdown mismatch: ${exitBreakdownTotal} categorized vs ${todayTrades.length} closed`);
+      }
+
       let worstPerformingSymbol = "None";
       let slCountForWorst = 0;
-      for (const [sym, count] of Object.entries(slCountsBySymbol)) {
+      for (const [symbol, count] of Object.entries(slCountsBySymbol)) {
         if (count > slCountForWorst) {
+          worstPerformingSymbol = symbol;
           slCountForWorst = count;
-          worstPerformingSymbol = sym;
         }
       }
-      if (worstPerformingSymbol === "None" && displayTrades.length > 0) {
-        worstPerformingSymbol = displayTrades[0].symbol;
-      }
-
-      // Determine Primary SL Cause
-      let primarySlCause = "5m Volatility Spike / Spread Wick";
-      let maxCauseCount = 0;
-      for (const [cause, count] of Object.entries(slCauses)) {
-        if (count > maxCauseCount) {
-          maxCauseCount = count;
-          primarySlCause = cause;
-        }
-      }
-
-      const averageTimeToSlSeconds = slDurationsSeconds.length > 0
-        ? Math.round(slDurationsSeconds.reduce((a, b) => a + b, 0) / slDurationsSeconds.length)
-        : 145;
-
-      const totalOpenedToday = displayTrades.length + activePositionsCount;
 
       res.json({
         success: true,
         analytics: {
-          todayOpenedCount: totalOpenedToday,
-          todayClosedCount: displayTrades.length,
+          tradingDay: "UTC",
+          tradingDayStartUtc: dayStartMs,
+          windowEndUtc: dayEndMs,
+          todayOpenedCount: openedTradeKeys.size,
+          todayClosedCount: todayTrades.length,
+          winningTradesCount: dailyCounters.wins,
+          losingTradesCount: dailyCounters.losses,
           activePositionsCount,
           maxSlots,
-          tpHitCount: Math.max(tpHitCount, displayTrades.filter(t => t.pnl > 0).length),
-          trailingStopCount,
-          slHitCount: Math.max(slHitCount, displayTrades.filter(t => t.pnl < 0).length),
-          manualCloseCount,
-          breakEvenCount,
+          tpHitCount: dailyCounters.tp,
+          trailingStopCount: dailyCounters.trailing,
+          slHitCount: dailyCounters.sl,
+          manualCloseCount: dailyCounters.manual,
+          otherExitCount: dailyCounters.other,
+          breakEvenCount: 0,
+          realizedPnlToday,
+          unrealizedPnlToday,
+          netDailyPnl,
           slAudit: {
-            primarySlCause,
-            worstPerformingSymbol: worstPerformingSymbol || "SOLUSDT",
-            slCountForWorst: Math.max(slCountForWorst, 1),
-            averageTimeToSlSeconds,
-            strategyFeedbackNote: `Analysis of ${displayTrades.length} recent executions indicates SL triggers primarily cluster around rapid 5m volatility spikes. Recommendation: Maintain Gate 2 Spread filter at <= 0.15% and verify 5m ATR is >= 0.3% to avoid sudden spread sweeps.`,
-            totalLossUsdt: displayTrades.filter(t => t.pnl < 0).reduce((sum, t) => sum + Math.abs(t.pnl), 0),
+            primarySlCause: dailyCounters.sl > 0 ? "Exact root cause unavailable from current Bybit/local metadata" : "No Stop Loss exits today",
+            worstPerformingSymbol,
+            slCountForWorst,
+            averageTimeToSlSeconds: 0,
+            strategyFeedbackNote: "Daily SL analytics now use only confirmed UTC-day exits. Unknown exit reasons remain Unknown / Other; no random or PnL-based cause classification is fabricated.",
+            totalLossUsdt: todayTrades
+              .filter((t: any) => t.exitTrigger === "Stop Loss")
+              .reduce((sum: number, t: any) => sum + Math.abs(Number(t.pnl || 0)), 0),
           },
-          closedTrades: displayTrades,
+          closedTrades: todayTrades,
         },
       });
     } catch (error: any) {
