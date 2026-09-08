@@ -2,6 +2,31 @@
 
 This project is configured to run as a Node.js web service on Render. It is set to use Bybit **Demo Trading** only (`BYBIT_DEMO=true`).
 
+## Final Strict Risk Rules
+
+**Last updated:** Tuesday, 08 September 2026 — 01:27 PM (Asia/Dhaka)
+
+The current agreed risk profile is:
+
+- **Gate 1 Turnover:** minimum **$25M**
+- **Gate 2 Trend:** EMA50/EMA200 direction must match, and price must stay on the correct side of EMA50
+- **Gate 3 Spread:** maximum **0.08%**
+- **Gate 4 ATR:** minimum **0.30%**, maximum **1.20%**
+- **Gate 5 OI:** minimum **+0.5% 1h open-interest expansion**
+- **Gate 6 RSI:** Long **52–62**, Short **38–48**
+- **Confirmed candle only:** entries must use confirmed closed candles
+- **Breakout confirmation:** not a hard gate; use only as a **soft confirmation / scoring bonus**
+- **No duplicate same-symbol position:** while a symbol has an OPEN position, no second position on the same symbol is allowed
+- **Post-close same-symbol cooldown:** after a symbol closes, wait **10 minutes** before a new entry on that symbol
+- **Max concurrent positions:** **3**
+- **Position margin:** **$50** per position
+- **Daily circuit breaker:** cumulative daily net loss of **-$50** stops all new entries for the day
+- **Consecutive-loss breaker:** **3 consecutive losses → 30-minute pause** before new entries
+- **Stop-loss policy:** do **not** widen SL to compensate for bad entries; improve entry quality and reduce exposure instead
+- **Breaker behavior:** existing open positions may still be managed/closed after a breaker triggers; only **new entries** are blocked
+
+The purpose of this profile is to reduce overtrading, duplicate exposure, bad entries, and heavy drawdowns without making the scanner so strict that valid trades disappear.
+
 ## Run locally
 
 1. Install Node.js 20 or 22.
