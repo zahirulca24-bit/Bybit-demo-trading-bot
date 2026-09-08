@@ -9,92 +9,51 @@ export class WebSocketEmitter {
   private lastPriceEmit = 0;
   private pendingPrices: Record<string, number> = {};
   private priceEmitTimer: NodeJS.Timeout | null = null;
-
   private lastTechEmit = 0;
   private pendingTechnicals: Record<string, any> = {};
   private techEmitTimer: NodeJS.Timeout | null = null;
 
   constructor(private io: SocketIOServer) {}
 
-  log(message: string) {
-    this.io.emit("log", message);
-  }
+  log(message: string) { this.io.emit("log", message); }
 
   updatePrices(prices: Record<string, number>) {
     this.pendingPrices = { ...this.pendingPrices, ...prices };
     const now = Date.now();
-    if (now - this.lastPriceEmit >= 1000) {
-      this.flushPrices();
-    } else if (!this.priceEmitTimer) {
-      this.priceEmitTimer = setTimeout(() => {
-        this.flushPrices();
-      }, 1000 - (now - this.lastPriceEmit));
-    }
+    if (now - this.lastPriceEmit >= 1000) this.flushPrices();
+    else if (!this.priceEmitTimer) this.priceEmitTimer = setTimeout(() => this.flushPrices(), 1000 - (now - this.lastPriceEmit));
   }
 
   private flushPrices() {
     this.lastPriceEmit = Date.now();
-    if (this.priceEmitTimer) {
-      clearTimeout(this.priceEmitTimer);
-      this.priceEmitTimer = null;
-    }
+    if (this.priceEmitTimer) clearTimeout(this.priceEmitTimer);
+    this.priceEmitTimer = null;
     this.io.emit("price-update", this.pendingPrices);
     this.io.emit("ticker:update", this.pendingPrices);
   }
 
-  updateWatchlist(watchlist: string[]) {
-    this.io.emit("watchlist-update", watchlist);
-  }
-
-  updatePositions(positions: any[]) {
-    this.io.emit("positions-update", positions);
-    this.io.emit("position:update", positions);
-  }
-
-  updateBalance(balance: string) {
-    this.io.emit("balance-update", { balance });
-    this.io.emit("wallet:update", { balance });
-  }
-
-  tradeUpdate(trade: any) {
-    this.io.emit("trade-update", trade);
-    this.io.emit("execution:update", trade);
-  }
-
-  updateKline(payload: { symbol: string; candle: any; ema9?: any; ema21?: any }) {
-    this.io.emit("kline-update", payload);
-    this.io.emit("kline:update", payload);
-  }
-
-  updateScanner(scannerState: any) {
-    this.io.emit("scanner-update", scannerState);
-    this.io.emit("scanner:update", scannerState);
-  }
+  updateWatchlist(watchlist: string[]) { this.io.emit("watchlist-update", watchlist); }
+  updatePositions(positions: any[]) { this.io.emit("positions-update", positions); this.io.emit("position:update", positions); }
+  updateBalance(balance: string) { this.io.emit("balance-update", { balance }); this.io.emit("wallet:update", { balance }); }
+  tradeUpdate(trade: any) { this.io.emit("trade-update", trade); this.io.emit("execution:update", trade); }
+  updateKline(payload: { symbol: string; candle: any; ema9?: any; ema21?: any }) { this.io.emit("kline-update", payload); this.io.emit("kline:update", payload); }
+  updateScanner(scannerState: any) { this.io.emit("scanner-update", scannerState); this.io.emit("scanner:update", scannerState); }
 
   updateTechnicals(technicals: Record<string, any>) {
     this.pendingTechnicals = { ...this.pendingTechnicals, ...technicals };
     const now = Date.now();
-    if (now - this.lastTechEmit >= 1000) {
-      this.flushTechnicals();
-    } else if (!this.techEmitTimer) {
-      this.techEmitTimer = setTimeout(() => {
-        this.flushTechnicals();
-      }, 1000 - (now - this.lastTechEmit));
-    }
+    if (now - this.lastTechEmit >= 1000) this.flushTechnicals();
+    else if (!this.techEmitTimer) this.techEmitTimer = setTimeout(() => this.flushTechnicals(), 1000 - (now - this.lastTechEmit));
   }
 
   private flushTechnicals() {
     this.lastTechEmit = Date.now();
-    if (this.techEmitTimer) {
-      clearTimeout(this.techEmitTimer);
-      this.techEmitTimer = null;
-    }
+    if (this.techEmitTimer) clearTimeout(this.techEmitTimer);
+    this.techEmitTimer = null;
     this.io.emit("technicals-update", this.pendingTechnicals);
   }
 
-  emitStatus(running: boolean, circuitBreaker: boolean = false) {
-    this.io.emit('bot-status', { running, circuitBreaker });
-  }
+  emitStatus(running: boolean, circuitBreaker: boolean = false) { this.io.emit("bot-status", { running, circuitBreaker }); }
 }
 
 export class RiskManager {
@@ -102,25 +61,25 @@ export class RiskManager {
 
   async getOpenPositions(): Promise<any[]> {
     try {
-      const positionRes = await this.bybit.getPositionInfo({ category: "linear", settleCoin: "USDT" });
-      const positions = positionRes.result?.list || [];
-      return positions.filter((p: any) => parseFloat(p.size) > 0);
+      const response = await this.bybit.getPositionInfo({ category: "linear", settleCoin: "USDT" });
+      return (response.result?.list || []).filter((p: any) => Number(p.size || 0) > 0);
     } catch (err: any) {
       this.emitter.log(`[RiskManager] Error fetching positions: ${err.message}`);
       return [];
     }
   }
 
-  calculateBrackets(price: number, tpPercent: number, slPercent: number) {
-    const takeProfit = (price * (1 + tpPercent / 100)).toFixed(2);
-    const stopLoss = (price * (1 - slPercent / 100)).toFixed(2);
+  calculateBrackets(price: number, tpPercent: number, slPercent: number, side: "Buy" | "Sell" = "Buy") {
+    const direction = side === "Buy" ? 1 : -1;
+    const takeProfit = (price * (1 + direction * tpPercent / 100)).toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
+    const stopLoss = (price * (1 - direction * slPercent / 100)).toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
     return { takeProfit, stopLoss };
   }
 }
 
 export class TradingEngine {
   private isRunning = false;
-  public circuitBreakerTriggered: boolean = false;
+  public circuitBreakerTriggered = false;
   private riskManager: RiskManager;
   public emitter: WebSocketEmitter;
   public telegram: TelegramNotifier;
@@ -132,104 +91,57 @@ export class TradingEngine {
   public tradeHistory: any[] = [];
   public currentTechnicals: Record<string, any> = {};
   public activePositions: any[] = [];
-  public currentBalance: string = "0";
+  public currentBalance = "0";
 
   public settings = {
     leverage: 10,
-    positionMarginUsdt: 100,
-    maxPositions: 5,
+    positionMarginUsdt: 50,
+    maxPositions: 3,
     tpPercent: 2.5,
     slPercent: 1.0,
     trailingStopPercent: 0.5,
-    maxLossUsdt: 100,
-    globalMaxLossUsdt: -100,
+    maxLossUsdt: 50,
+    globalMaxLossUsdt: -50,
   };
 
   private positionState: Record<string, { peakPrice: number; breakEvenSet: boolean }> = {};
   private isProcessingTrade: Record<string, boolean> = {};
-  private lastCheckLogTime: Record<string, number> = {};
   private syncTimer: NodeJS.Timeout | null = null;
+  private lastRiskLogAt = 0;
+  private readonly symbolCooldownMs = 10 * 60 * 1000;
+  private readonly consecutiveLossPauseMs = 30 * 60 * 1000;
 
-  constructor(
-    private bybit: RestClientV5,
-    io: SocketIOServer,
-    apiKey?: string,
-    apiSecret?: string
-  ) {
+  constructor(private bybit: RestClientV5, io: SocketIOServer, apiKey?: string, apiSecret?: string) {
     this.emitter = new WebSocketEmitter(io);
     this.riskManager = new RiskManager(bybit, this.emitter);
     this.telegram = new TelegramNotifier();
-
-    // Initialize high-performance Bybit V5 WebSocket Manager
     this.wsManager = new BybitWebSocketManager(
       bybit,
       apiKey || process.env.BYBIT_API_KEY,
       apiSecret || process.env.BYBIT_API_SECRET,
-      process.env.BYBIT_DEMO === 'true' // UTA Demo Trading
+      process.env.BYBIT_DEMO === "true"
     );
-
-    // Initialize Dynamic Market Scanner Engine
     this.scanner = new MarketScanner(bybit, this.emitter, this.telegram, this);
-
     this.setupWebSocketHandlers();
-    this.init();
-  }
-
-  private async ensureLeverage(symbol: string) {
-    try {
-      await this.bybit.setLeverage({
-        category: "linear",
-        symbol,
-        buyLeverage: this.settings.leverage.toString(),
-        sellLeverage: this.settings.leverage.toString(),
-      });
-      this.emitter.log(`[${symbol}] Leverage enforced to ${this.settings.leverage}x`);
-    } catch (e: any) {
-      if (!e.message?.toLowerCase().includes("not modified")) {
-        this.emitter.log(`[${symbol}] Could not enforce leverage: ${e.message}`);
-      }
-    }
+    void this.init();
   }
 
   private async init() {
-    this.emitter.log("[TradingEngine] Initializing real-time V5 1m-WebSocket pipelines...");
+    this.emitter.log("[TradingEngine] Initializing strict 5m scanner + real-time risk management...");
     await this.wsManager.init(this.watchlist);
-    
-    // Initial fetch of active positions to sync state
     await this.syncPositions();
-
-    // Initialize Dynamic Market Scanner
     await this.scanner.init();
-
-    // Auto-start engine on server load by default
     this.start();
-
-    // Start background sync every 5 seconds to guarantee 100% position reconciliation
     if (this.syncTimer) clearInterval(this.syncTimer);
-    this.syncTimer = setInterval(() => {
-      this.syncPositions();
-    }, 5000);
+    this.syncTimer = setInterval(() => void this.syncPositions(), 5000);
   }
 
   private setupWebSocketHandlers() {
-    // 1. Logs from WS
-    this.wsManager.on("log", (msg: string) => {
-      this.emitter.log(msg);
-    });
+    this.wsManager.on("log", (msg: string) => this.emitter.log(msg));
 
-    // 2. Real-time Kline updates (candle ticks & closes)
     this.wsManager.on("kline", (payload: KlineEventPayload) => {
-      const { symbol, candle, technicals, isConfirmed } = payload;
-
-      // Update cached technicals
-      this.currentTechnicals[symbol] = {
-        ema9: technicals.ema9,
-        ema21: technicals.ema21,
-        rsi: technicals.rsi,
-        timestamp: Date.now(),
-      };
-
-      // Relay to frontend and charts
+      const { symbol, candle, technicals } = payload;
+      this.currentTechnicals[symbol] = { ema9: technicals.ema9, ema21: technicals.ema21, rsi: technicals.rsi, timestamp: Date.now() };
       this.emitter.updateKline({
         symbol,
         candle,
@@ -237,180 +149,362 @@ export class TradingEngine {
         ema21: { time: candle.time, value: Number(technicals.ema21.toFixed(4)) },
       });
       this.emitter.updateTechnicals(this.currentTechnicals);
-
-      // When bot is active, evaluate strategy signals on 1m candle events
-      if (this.isRunning) {
-        this.evaluateStrategySignal(symbol, candle.close, technicals, isConfirmed);
-      }
+      // Legacy 1m auto-entry is intentionally disabled. New entries come only from the confirmed 5m strict scanner.
     });
 
-    // 3. Real-time Ticker / Mark price updates
     this.wsManager.on("ticker", (payload: TickerEventPayload) => {
-      const { symbol, price } = payload;
-      this.currentPrices[symbol] = price;
-
-      // Relay live ticker prices to frontend (throttled to max 1/sec)
+      this.currentPrices[payload.symbol] = payload.price;
       this.emitter.updatePrices(this.currentPrices);
-
-      // Event-driven Trailing Stop and Break-Even check
-      if (this.isRunning) {
-        this.checkTrailingStopAndBreakEven(symbol, price);
-      }
+      if (this.isRunning) void this.checkTrailingStopAndBreakEven(payload.symbol, payload.price);
     });
 
-    // 4. Real-time Private Position updates
     this.wsManager.on("position", (positions: any[]) => {
-      const open = positions.filter((p) => parseFloat(p.size) > 0);
-      
-      // Reconcile closed positions immediately
-      for (const sym of Object.keys(this.positionState)) {
-        const stillOpen = open.find((p) => p.symbol === sym);
-        if (!stillOpen) {
-          this.emitter.log(`[${sym}] Position closed on exchange. Active state cleared.`);
-          delete this.positionState[sym];
-        }
-      }
-
-      this.activePositions = open;
-      this.emitter.updatePositions(open);
+      this.activePositions = positions.filter((p) => Number(p.size || 0) > 0);
+      this.emitter.updatePositions(this.activePositions);
     });
 
-    // 5. Real-time Private Execution updates
     this.wsManager.on("execution", (exec: any) => {
       if (exec.execType === "Trade" || exec.execType === "Bust") {
         this.emitter.log(`[Bybit WS Private] Order Fill: ${exec.symbol} ${exec.side} ${exec.execQty} @ $${exec.execPrice}`);
-        
         this.emitter.tradeUpdate({
           id: exec.execId || exec.orderId,
           symbol: exec.symbol,
           side: exec.side,
-          price: parseFloat(exec.execPrice),
+          price: Number(exec.execPrice),
           qty: exec.execQty,
-          time: parseInt(exec.execTime, 10) || Date.now(),
+          time: Number(exec.execTime) || Date.now(),
         });
       }
     });
 
-    // 6. Real-time Private Wallet updates
     this.wsManager.on("wallet", (walletBalance: string) => {
       this.currentBalance = walletBalance;
       this.emitter.updateBalance(walletBalance);
-      this.emitter.log(`[Bybit WS Private] Wallet balance updated: $${walletBalance} USDT`);
     });
+  }
+
+  private async ensureLeverage(symbol: string) {
+    try {
+      await this.bybit.setLeverage({
+        category: "linear",
+        symbol,
+        buyLeverage: String(this.settings.leverage),
+        sellLeverage: String(this.settings.leverage),
+      });
+    } catch (err: any) {
+      if (!String(err?.message || "").toLowerCase().includes("not modified")) this.emitter.log(`[${symbol}] Leverage warning: ${err.message}`);
+    }
+  }
+
+  private extractClosedTime(item: any): number {
+    return Number(item.updatedTime || item.createdTime || item.execTime || 0);
+  }
+
+  private async getDailyRiskSnapshot() {
+    const [positions, closedRes] = await Promise.all([
+      this.riskManager.getOpenPositions(),
+      this.bybit.getClosedPnL({ category: "linear", limit: 100 }).catch(() => null),
+    ]);
+    const start = new Date();
+    start.setUTCHours(0, 0, 0, 0);
+    const closed = closedRes?.retCode === 0 ? (closedRes.result?.list || []) : [];
+    const realized = closed.reduce((sum: number, item: any) => {
+      const t = this.extractClosedTime(item);
+      return t >= start.getTime() ? sum + Number(item.closedPnl || 0) : sum;
+    }, 0);
+    const unrealized = positions.reduce((sum: number, pos: any) => sum + Number(pos.unrealisedPnl || 0), 0);
+    return { positions, closed, realized, unrealized, net: realized + unrealized };
+  }
+
+  public async canOpenSymbol(symbol: string): Promise<{ allowed: boolean; reason?: string }> {
+    if (!this.isRunning) return { allowed: false, reason: "Bot engine is halted" };
+
+    try {
+      const snapshot = await this.getDailyRiskSnapshot();
+      this.activePositions = snapshot.positions;
+
+      if (snapshot.positions.length >= this.settings.maxPositions) {
+        return { allowed: false, reason: `Max ${this.settings.maxPositions} concurrent positions reached` };
+      }
+      if (snapshot.positions.some((p: any) => p.symbol === symbol && Number(p.size || 0) > 0)) {
+        return { allowed: false, reason: "Same-symbol position already open" };
+      }
+
+      const dailyLimit = -Math.abs(this.settings.maxLossUsdt || 50);
+      if (snapshot.net <= dailyLimit) {
+        this.circuitBreakerTriggered = true;
+        this.emitter.emitStatus(this.isRunning, true);
+        return { allowed: false, reason: `Daily circuit breaker active: net PnL $${snapshot.net.toFixed(2)} <= $${dailyLimit.toFixed(2)}` };
+      }
+
+      const ordered = [...snapshot.closed].sort((a: any, b: any) => this.extractClosedTime(b) - this.extractClosedTime(a));
+      const lastThree = ordered.slice(0, 3);
+      if (lastThree.length === 3 && lastThree.every((t: any) => Number(t.closedPnl || 0) < 0)) {
+        const latestClose = this.extractClosedTime(lastThree[0]);
+        const remaining = this.consecutiveLossPauseMs - (Date.now() - latestClose);
+        if (remaining > 0) return { allowed: false, reason: `3-loss pause active (${Math.ceil(remaining / 60000)}m remaining)` };
+      }
+
+      const latestForSymbol = ordered.find((t: any) => t.symbol === symbol);
+      if (latestForSymbol) {
+        const closeTime = this.extractClosedTime(latestForSymbol);
+        const remaining = this.symbolCooldownMs - (Date.now() - closeTime);
+        if (remaining > 0) return { allowed: false, reason: `${symbol} post-close cooldown (${Math.ceil(remaining / 60000)}m remaining)` };
+      }
+
+      if (this.circuitBreakerTriggered) {
+        this.circuitBreakerTriggered = false;
+        this.emitter.emitStatus(this.isRunning, false);
+      }
+      return { allowed: true };
+    } catch (err: any) {
+      return { allowed: false, reason: `Risk validation unavailable: ${err.message}` };
+    }
+  }
+
+  public async checkCircuitBreaker() {
+    if (!this.isRunning) return;
+    try {
+      const snapshot = await this.getDailyRiskSnapshot();
+      const limit = -Math.abs(this.settings.maxLossUsdt || 50);
+      const triggered = snapshot.net <= limit;
+      if (triggered !== this.circuitBreakerTriggered) {
+        this.circuitBreakerTriggered = triggered;
+        this.emitter.emitStatus(this.isRunning, triggered);
+        if (triggered) {
+          this.emitter.log(`🚨 [DAILY ENTRY BREAKER] Net daily PnL $${snapshot.net.toFixed(2)} reached $${limit.toFixed(2)}. New entries blocked; existing positions remain managed.`);
+          this.telegram.send(`🚨 <b>DAILY ENTRY BREAKER</b>\nNet daily PnL: <b>$${snapshot.net.toFixed(2)}</b>. New entries are blocked; open positions continue to be managed.`);
+        } else {
+          this.emitter.log("✅ [DAILY ENTRY BREAKER] Risk condition cleared; new entries may resume if all other rules pass.");
+        }
+      }
+    } catch {
+      // Fail closed happens in canOpenSymbol. Avoid noisy background errors here.
+    }
   }
 
   public async syncPositions() {
     try {
+      const previousSymbols = new Set(this.activePositions.filter((p) => Number(p.size || 0) > 0).map((p) => p.symbol));
       const positions = await this.riskManager.getOpenPositions();
-      
-      // Check for closed positions compared to previous state
-      for (const sym of Object.keys(this.positionState)) {
-        const stillOpen = positions.find((p) => p.symbol === sym);
-        if (!stillOpen) {
-          delete this.positionState[sym];
-          this.emitter.log(`[${sym}] Position closed on exchange (TP/SL/Exit). Local slot freed.`);
-          
-          try {
-            const closedPnlRes = await this.bybit.getClosedPnL({ category: "linear", symbol: sym, limit: 1 });
-            if (closedPnlRes.retCode === 0 && closedPnlRes.result?.list?.length > 0) {
-              const closedData = closedPnlRes.result.list[0];
-              const pnl = parseFloat(closedData.closedPnl);
-              const exitPrice = parseFloat(closedData.avgExitPrice);
-              const entryPrice = parseFloat(closedData.avgEntryPrice);
-              const qty = parseFloat(closedData.qty);
-              const pnlPercent = entryPrice > 0 ? ((exitPrice - entryPrice) / entryPrice) * 100 * (closedData.side === "Sell" ? 1 : -1) : 0;
-              
-              // Determine reason based on PnL vs TP/SL logic or API fields
-              let reason = "Manual Close / Exchange";
-              if (pnlPercent >= this.settings.tpPercent * 0.9) reason = `Take Profit (+${pnlPercent.toFixed(2)}%)`;
-              else if (pnlPercent <= -this.settings.slPercent * 0.9) reason = `Hard SL (${pnlPercent.toFixed(2)}%)`;
-              else if (pnlPercent > 0) reason = `Trailing Stop / TP`;
-              
-              const closedTrade = {
-                id: closedData.orderId || `closed-${Date.now()}`,
-                symbol: sym,
-                side: closedData.side === "Sell" ? "Buy" : "Sell", // side returned is closing order side
-                entryPrice,
-                exitPrice,
-                qty,
-                reason,
-                pnl,
-                pnlPercent,
-                time: Date.now(),
-              };
-              
-              // Ensure we don't add duplicate
-              if (!this.tradeHistory.find(t => t.id === closedTrade.id)) {
-                this.tradeHistory.unshift(closedTrade);
-                this.emitter.tradeUpdate(closedTrade);
-                this.telegram.sendTradeClosed(sym, exitPrice, reason, pnl, pnlPercent);
-                dbRecordTrade({ symbol: sym, side: closedData.side === "Sell" ? "Sell" : "Buy", entryPrice, exitPrice, status: "CLOSED", exitReason: reason, realizedPnl: pnl, closedAt: closedTrade.time, sizeNotional: 1000, marginUsed: 100, leverage: this.settings.leverage || 10 });
-              }
-            }
-          } catch (e) {
-            this.emitter.log(`[${sym}] Could not fetch closed PnL details: ${e}`);
-          }
-        }
+      const currentSymbols = new Set(positions.map((p) => p.symbol));
+
+      for (const symbol of previousSymbols) {
+        if (!currentSymbols.has(symbol)) await this.recordLatestClosedTrade(symbol);
       }
 
       this.activePositions = positions;
+      for (const pos of positions) {
+        const price = Number(pos.markPrice || pos.avgPrice || 0);
+        if (!this.positionState[pos.symbol] && price > 0) this.positionState[pos.symbol] = { peakPrice: price, breakEvenSet: false };
+      }
+      for (const symbol of Object.keys(this.positionState)) if (!currentSymbols.has(symbol)) delete this.positionState[symbol];
       this.emitter.updatePositions(positions);
-
-      // Evaluate Circuit Breaker Net PnL threshold
       await this.checkCircuitBreaker();
-    } catch (err: any) {
-      // Avoid spamming logs if network error
+    } catch {
+      // Keep the engine alive; entry checks fail closed if risk data cannot be fetched.
     }
   }
 
-  /**
-   * Global Max Loss / Circuit Breaker check
-   * When Net Realized + Floating PnL drops to or below -$maxLossUsdt, auto-halt bot and panic close all trades.
-   */
-  public async checkCircuitBreaker() {
-    if (!this.isRunning) return;
+  private async recordLatestClosedTrade(symbol: string) {
+    try {
+      const res = await this.bybit.getClosedPnL({ category: "linear", symbol, limit: 1 });
+      const item: any = res.retCode === 0 ? res.result?.list?.[0] : null;
+      if (!item) return;
+      const pnl = Number(item.closedPnl || 0);
+      const entryPrice = Number(item.avgEntryPrice || 0);
+      const exitPrice = Number(item.avgExitPrice || 0);
+      const qty = Number(item.qty || 0);
+      const entryNotional = entryPrice * qty;
+      const pnlPercent = entryNotional > 0 ? (pnl / entryNotional) * 100 : 0;
+      const time = this.extractClosedTime(item) || Date.now();
+      const id = String(item.orderId || `${symbol}-${time}`);
+      if (this.tradeHistory.some((t) => t.id === id)) return;
 
-    // Calculate floating unrealized PnL from active positions
-    const totalUnrealizedPnl = this.activePositions.reduce((acc, pos) => {
-      const pnl = parseFloat(pos.unrealisedPnl || "0");
-      return acc + (isNaN(pnl) ? 0 : pnl);
-    }, 0);
+      const side = item.side === "Sell" ? "Buy" : "Sell";
+      const trade = { id, symbol, side, entryPrice, exitPrice, qty, reason: "Bybit Closed PnL", pnl, pnlPercent, time };
+      this.tradeHistory.unshift(trade);
+      this.emitter.tradeUpdate(trade);
+      this.telegram.sendTradeClosed(symbol, exitPrice, "Bybit Closed PnL", pnl, pnlPercent);
+      dbRecordTrade({
+        symbol,
+        side,
+        entryPrice,
+        exitPrice,
+        status: "CLOSED",
+        exitReason: "Bybit Closed PnL",
+        realizedPnl: pnl,
+        closedAt: time,
+        sizeNotional: entryNotional,
+        marginUsed: entryNotional / (this.settings.leverage || 10),
+        leverage: this.settings.leverage || 10,
+      });
+    } catch (err: any) {
+      this.emitter.log(`[${symbol}] Closed-PnL reconciliation warning: ${err.message}`);
+    }
+  }
 
-    // Calculate realized PnL from today's trade history (00:00 UTC)
-    const todayStart = new Date();
-    todayStart.setUTCHours(0, 0, 0, 0);
-    const totalRealizedPnl = this.tradeHistory.reduce((acc, trade) => {
-      if (trade.pnl !== undefined && trade.time && trade.time >= todayStart.getTime()) {
-        const pnl = parseFloat(trade.pnl);
-        return acc + (isNaN(pnl) ? 0 : pnl);
+  private async validatePreOrder(symbol: string, side: "Buy" | "Sell", notionalSizeUsdt: number): Promise<{ valid: boolean; qty: string; price: number; reason?: string }> {
+    const risk = await this.canOpenSymbol(symbol);
+    if (!risk.allowed) return { valid: false, qty: "0", price: 0, reason: risk.reason };
+
+    try {
+      const walletRes = await this.bybit.getWalletBalance({ accountType: "UNIFIED", coin: "USDT" });
+      const coin = walletRes.result?.list?.[0]?.coin?.[0];
+      if (coin) {
+        const available = Number(coin.availableToWithdraw || 0);
+        const required = notionalSizeUsdt / (this.settings.leverage || 10);
+        if (available < required) return { valid: false, qty: "0", price: 0, reason: `Available margin $${available.toFixed(2)} < required $${required.toFixed(2)}` };
       }
-      return acc;
-    }, 0);
 
-    const netPnl = totalRealizedPnl + totalUnrealizedPnl;
-    const maxLossThreshold = -Math.abs(this.settings.maxLossUsdt || 100);
+      const orderbook = await this.bybit.getOrderbook({ category: "linear", symbol, limit: 1 });
+      if (orderbook.retCode !== 0 || !orderbook.result?.b?.length || !orderbook.result?.a?.length) return { valid: false, qty: "0", price: 0, reason: "Orderbook unavailable" };
+      const bid = Number(orderbook.result.b[0][0]);
+      const ask = Number(orderbook.result.a[0][0]);
+      const mid = (bid + ask) / 2;
+      const spread = mid > 0 ? ((ask - bid) / mid) * 100 : Number.POSITIVE_INFINITY;
+      if (!Number.isFinite(spread) || spread > 0.08) return { valid: false, qty: "0", price: side === "Buy" ? ask : bid, reason: `Spread ${spread.toFixed(3)}% exceeds 0.08%` };
 
-    if (netPnl <= maxLossThreshold) {
-      this.emitter.log(
-        `🚨 [CIRCUIT BREAKER TRIGGERED] Net PnL is $${netPnl.toFixed(2)} USDT (Limit: $${maxLossThreshold} USDT). Halting bot and closing all positions immediately!`
-      );
-      this.telegram.send(
-        `🚨 <b>CIRCUIT BREAKER ACTIVATED</b>\nNet PnL dropped to <b>$${netPnl.toFixed(2)} USDT</b> (Limit: -$${Math.abs(maxLossThreshold)} USDT).\nBot engine auto-halted and all active trades closed.`
-      );
+      const instrumentRes = await this.bybit.getInstrumentsInfo({ category: "linear", symbol });
+      const instrument: any = instrumentRes.result?.list?.[0];
+      if (instrumentRes.retCode !== 0 || !instrument) return { valid: false, qty: "0", price: side === "Buy" ? ask : bid, reason: "Instrument info unavailable" };
+      const minQty = Number(instrument.lotSizeFilter.minOrderQty);
+      const qtyStep = Number(instrument.lotSizeFilter.qtyStep);
+      const executionPrice = side === "Buy" ? ask : bid;
+      const rawQty = notionalSizeUsdt / executionPrice;
+      const precision = String(instrument.lotSizeFilter.qtyStep).split(".")[1]?.length || 0;
+      const qtyNum = Math.max(minQty, Math.floor(rawQty / qtyStep) * qtyStep);
+      return { valid: true, qty: qtyNum.toFixed(precision), price: executionPrice };
+    } catch (err: any) {
+      return { valid: false, qty: "0", price: 0, reason: `Pre-order validation error: ${err.message}` };
+    }
+  }
 
-      this.circuitBreakerTriggered = true;
-      this.emitter.log('🔒 [Bot Locked] Status set to CIRCUIT_BREAKER_TRIGGERED. Manual reset required to trade again.');
-      this.stop();
-      this.emitter.emitStatus(false, true);
+  public async executeScannerEntry(
+    symbol: string,
+    side: "Buy" | "Sell",
+    currentPrice: number,
+    ema50: number,
+    ema200: number,
+    rsi: number
+  ): Promise<{ success: boolean; message: string; orderId?: string }> {
+    const targetSymbol = symbol.toUpperCase();
+    if (this.isProcessingTrade[targetSymbol]) return { success: false, message: `Trade already in progress for ${targetSymbol}` };
+    this.isProcessingTrade[targetSymbol] = true;
 
-      // Emergency panic close all open positions
-      await this.closeAllPositions();
+    try {
+      const notional = this.settings.positionMarginUsdt * this.settings.leverage;
+      const pre = await this.validatePreOrder(targetSymbol, side, notional);
+      if (!pre.valid) return { success: false, message: pre.reason || "Risk validation failed" };
+      currentPrice = pre.price;
+      const { takeProfit, stopLoss } = this.riskManager.calculateBrackets(currentPrice, this.settings.tpPercent, this.settings.slPercent, side);
+      await this.ensureLeverage(targetSymbol);
+
+      this.emitter.log(`⚡ [Scanner Execution] ${side === "Buy" ? "LONG" : "SHORT"} ${targetSymbol} | Margin $${this.settings.positionMarginUsdt} | Notional ~$${notional} | TP ${takeProfit} | SL ${stopLoss}`);
+      const orderRes = await this.bybit.submitOrder({
+        category: "linear",
+        symbol: targetSymbol,
+        side,
+        orderType: "Market",
+        qty: pre.qty,
+        timeInForce: "IOC",
+        takeProfit,
+        stopLoss,
+      });
+      if (orderRes.retCode !== 0) return { success: false, message: orderRes.retMsg || "Bybit rejected scanner order" };
+
+      const orderId = orderRes.result?.orderId || `scan-${Date.now()}`;
+      const position = { symbol: targetSymbol, side, size: pre.qty, avgPrice: String(currentPrice), markPrice: String(currentPrice) };
+      this.activePositions.push(position);
+      this.positionState[targetSymbol] = { peakPrice: currentPrice, breakEvenSet: false };
+      this.emitter.updatePositions(this.activePositions);
+      this.telegram.sendTradeExecution(targetSymbol, side === "Buy" ? "Long (Strict Scanner)" : "Short (Strict Scanner)", currentPrice, pre.qty, takeProfit, stopLoss);
+      dbRecordTrade({
+        symbol: targetSymbol,
+        side,
+        entryPrice: currentPrice,
+        status: "OPEN",
+        sizeNotional: notional,
+        marginUsed: this.settings.positionMarginUsdt,
+        leverage: this.settings.leverage,
+      });
+      if (!this.watchlist.includes(targetSymbol)) void this.addSymbol(targetSymbol);
+      setTimeout(() => void this.syncPositions(), 800);
+      return { success: true, message: `${side === "Buy" ? "Long" : "Short"} entry placed for ${targetSymbol}`, orderId };
+    } catch (err: any) {
+      return { success: false, message: err.message };
+    } finally {
+      this.isProcessingTrade[targetSymbol] = false;
+    }
+  }
+
+  private async checkTrailingStopAndBreakEven(symbol: string, currentPrice: number) {
+    if (this.isProcessingTrade[symbol]) return;
+    const pos = this.activePositions.find((p) => p.symbol === symbol && Number(p.size || 0) > 0);
+    if (!pos) return;
+    const entry = Number(pos.avgPrice || 0);
+    if (!(entry > 0)) return;
+    const isLong = pos.side === "Buy";
+    const pnlPercent = ((currentPrice - entry) / entry) * 100 * (isLong ? 1 : -1);
+
+    if (!this.positionState[symbol]) this.positionState[symbol] = { peakPrice: currentPrice, breakEvenSet: false };
+    const state = this.positionState[symbol];
+    if (isLong) state.peakPrice = Math.max(state.peakPrice, currentPrice);
+    else state.peakPrice = Math.min(state.peakPrice, currentPrice);
+
+    if (pnlPercent >= 1 && !state.breakEvenSet) {
+      try {
+        await this.bybit.setTradingStop({ category: "linear", symbol, stopLoss: String(entry), slTriggerBy: "LastPrice", positionIdx: 0 });
+        state.breakEvenSet = true;
+        this.emitter.log(`[${symbol}] +1.0% reached; SL moved to break-even.`);
+      } catch (err: any) {
+        this.emitter.log(`[${symbol}] Break-even update warning: ${err.message}`);
+      }
+    }
+
+    if (pnlPercent < 1) return;
+    const trailing = isLong
+      ? state.peakPrice * (1 - this.settings.trailingStopPercent / 100)
+      : state.peakPrice * (1 + this.settings.trailingStopPercent / 100);
+    const triggered = isLong ? currentPrice <= trailing : currentPrice >= trailing;
+    if (!triggered) return;
+
+    this.isProcessingTrade[symbol] = true;
+    try {
+      const closeRes = await this.bybit.submitOrder({
+        category: "linear",
+        symbol,
+        side: isLong ? "Sell" : "Buy",
+        orderType: "Market",
+        qty: String(pos.size),
+        reduceOnly: true,
+        timeInForce: "IOC",
+      });
+      if (closeRes.retCode === 0) {
+        this.emitter.log(`[${symbol}] Trailing stop exit submitted.`);
+        this.activePositions = this.activePositions.filter((p) => p.symbol !== symbol);
+        delete this.positionState[symbol];
+        this.emitter.updatePositions(this.activePositions);
+        setTimeout(() => void this.syncPositions(), 500);
+      }
+    } catch (err: any) {
+      this.emitter.log(`[${symbol}] Trailing stop error: ${err.message}`);
+    } finally {
+      this.isProcessingTrade[symbol] = false;
     }
   }
 
   public updateSettings(newSettings: Partial<typeof this.settings>) {
-    this.settings = { ...this.settings, ...newSettings };
-    this.emitter.log("[Settings] Engine parameters updated.");
+    this.settings = {
+      ...this.settings,
+      ...newSettings,
+      positionMarginUsdt: 50,
+      maxPositions: 3,
+      maxLossUsdt: 50,
+      globalMaxLossUsdt: -50,
+    };
+    this.scanner.setMaxConcurrent(3);
+    this.emitter.log("[Settings] Strict risk caps enforced: $50 margin, 3 slots, -$50 daily breaker.");
   }
 
   public async addSymbol(symbol: string) {
@@ -425,96 +519,31 @@ export class TradingEngine {
   public removeSymbol(symbol: string) {
     const formatted = symbol.toUpperCase();
     this.watchlist = this.watchlist.filter((s) => s !== formatted);
-    delete this.currentPrices[symbol];
-    delete this.currentTechnicals[symbol];
-    delete this.positionState[symbol];
-
+    delete this.currentPrices[formatted];
+    delete this.currentTechnicals[formatted];
     this.emitter.updateWatchlist(this.watchlist);
     this.emitter.updatePrices(this.currentPrices);
     this.wsManager.removeSymbol(formatted);
   }
 
+  public getHistory() { return this.tradeHistory; }
+  public getTechnicals() { return this.currentTechnicals; }
+  public getIsRunning() { return this.isRunning; }
+  public testTelegram() { this.telegram.send("🔔 <b>Test Notification</b>\nStrict Bybit demo trading pipeline is active."); }
+
   public resetCircuitBreaker() {
     this.circuitBreakerTriggered = false;
-    this.emitter.log('✅ Circuit Breaker manually reset. Bot unlocked.');
     this.emitter.emitStatus(this.isRunning, false);
-  }
-
-  public getIsRunning() {
-    return this.isRunning;
-  }
-
-
-  private async validatePreOrder(symbol: string, notionalSizeUsdt: number = 1000): Promise<{ valid: boolean, qty: string, price: number, reason?: string }> {
-    try {
-      // 1. Available Margin Check
-      const walletRes = await this.bybit.getWalletBalance({ accountType: "UNIFIED", coin: "USDT" });
-      if (walletRes.retCode === 0 && walletRes.result.list.length > 0 && walletRes.result.list[0].coin.length > 0) {
-        const availableBal = parseFloat(walletRes.result.list[0].coin[0].availableToWithdraw || "0");
-        const requiredMargin = notionalSizeUsdt / (this.settings.leverage || 10);
-        if (availableBal < requiredMargin) {
-          return { valid: false, qty: "0", price: 0, reason: `Available Margin (${availableBal.toFixed(2)}) < Required (${requiredMargin.toFixed(2)})` };
-        }
-      }
-
-      // 2. Gate 3 Slippage Guard: Orderbook Spread
-      const orderbook = await this.bybit.getOrderbook({ category: "linear", symbol, limit: 1 });
-      if (orderbook.retCode !== 0 || !orderbook.result.b.length || !orderbook.result.a.length) {
-        return { valid: false, qty: "0", price: 0, reason: "Failed to fetch orderbook or low liquidity" };
-      }
-      const bid = parseFloat(orderbook.result.b[0][0]);
-      const ask = parseFloat(orderbook.result.a[0][0]);
-      const spreadPercent = ((ask - bid) / ask) * 100;
-      if (spreadPercent > 0.15) {
-        return { valid: false, qty: "0", price: ask, reason: `Execution Aborted: Spread expanded beyond 0.15% (${spreadPercent.toFixed(3)}%)` };
-      }
-
-      // 3. Lot Size Normalization
-      const instrumentRes = await this.bybit.getInstrumentsInfo({ category: "linear", symbol });
-      if (instrumentRes.retCode !== 0 || !instrumentRes.result.list.length) {
-        return { valid: false, qty: "0", price: ask, reason: "Failed to fetch instrument info" };
-      }
-      const instrument = instrumentRes.result.list[0];
-      const minOrderQty = parseFloat(instrument.lotSizeFilter.minOrderQty);
-      const qtyStep = parseFloat(instrument.lotSizeFilter.qtyStep);
-      
-      let rawQty = notionalSizeUsdt / ask;
-      const precision = qtyStep.toString().split('.')[1]?.length || 0;
-      let qtyNum = Math.floor(rawQty / qtyStep) * qtyStep;
-      if (qtyNum < minOrderQty) {
-          qtyNum = minOrderQty;
-      }
-      const qty = qtyNum.toFixed(precision);
-
-      return { valid: true, qty, price: ask };
-    } catch (err: any) {
-      return { valid: false, qty: "0", price: 0, reason: `Pre-order validation error: ${err.message}` };
-    }
-  }
-
-  public getHistory() {
-    return this.tradeHistory;
-  }
-
-  public getTechnicals() {
-    return this.currentTechnicals;
-  }
-
-  public testTelegram() {
-    this.telegram.send("🔔 <b>Test Notification</b>\nBybit V5 WebSocket-driven trading pipeline is active!");
+    this.emitter.log("✅ Circuit-breaker display reset. Entry risk is re-validated before every order.");
   }
 
   public start() {
-    if (this.circuitBreakerTriggered) {
-      this.emitter.log('❌ Cannot start bot: CIRCUIT_BREAKER_TRIGGERED. Please reset risk limits.');
-      return false;
-    }
     if (this.isRunning) return false;
     this.isRunning = true;
     this.emitter.emitStatus(true, this.circuitBreakerTriggered);
     this.telegram.sendBotStatus(true);
-    this.emitter.log(`🚀 [Bot Started] Active concurrency enabled (Up to ${this.settings.maxPositions || 5} concurrent positions, ${this.settings.leverage || 10}x leverage). Monitoring 1m streams...`);
-    this.syncPositions();
+    this.emitter.log(`🚀 [Bot Started] Strict mode: max ${this.settings.maxPositions} positions, $${this.settings.positionMarginUsdt} margin each, 10m symbol cooldown, -$${this.settings.maxLossUsdt} daily entry breaker.`);
+    void this.syncPositions();
     return true;
   }
 
@@ -523,670 +552,94 @@ export class TradingEngine {
     this.isRunning = false;
     this.emitter.emitStatus(false, this.circuitBreakerTriggered);
     this.telegram.sendBotStatus(false);
-    this.emitter.log("🛑 [Bot Stopped] Strategy execution paused.");
+    this.emitter.log("🛑 [Bot Stopped] New entries and active management paused.");
     return true;
   }
 
-  /**
-   * Manual Market Exit for any active position
-   */
   public async manualClosePosition(symbol: string): Promise<{ success: boolean; message: string }> {
-    const targetSymbol = symbol.toUpperCase();
-    const pos = this.activePositions.find((p) => p.symbol === targetSymbol);
-
-    if (!pos || parseFloat(pos.size) <= 0) {
-      return { success: false, message: `No active position found for ${targetSymbol}` };
-    }
-
-    this.emitter.log(`[Manual Close] Executing Market Exit for ${targetSymbol} (${pos.size} contracts)...`);
-
+    const target = symbol.toUpperCase();
+    const pos = this.activePositions.find((p) => p.symbol === target && Number(p.size || 0) > 0);
+    if (!pos) return { success: false, message: `No active position found for ${target}` };
     try {
-      const closeRes = await this.bybit.submitOrder({
+      const result = await this.bybit.submitOrder({
         category: "linear",
-        symbol: targetSymbol,
+        symbol: target,
         side: pos.side === "Buy" ? "Sell" : "Buy",
         orderType: "Market",
-        qty: pos.size,
+        qty: String(pos.size),
         reduceOnly: true,
         timeInForce: "IOC",
       });
-
-      if (closeRes.retCode === 0) {
-        const currentPrice = this.currentPrices[targetSymbol] || parseFloat(pos.avgPrice);
-        const entryPrice = parseFloat(pos.avgPrice);
-        const isLong = pos.side === "Buy";
-        const realizedPnl = (currentPrice - entryPrice) * parseFloat(pos.size) * (isLong ? 1 : -1);
-        const pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100 * (isLong ? 1 : -1);
-
-        this.emitter.log(`[${targetSymbol}] Manual Market Exit filled successfully! Order ID: ${closeRes.result?.orderId}`);
-
-        const tradeRecord = {
-          id: closeRes.result?.orderId || `manual-${Date.now()}`,
-          symbol: targetSymbol,
-          side: pos.side,
-          entryPrice,
-          exitPrice: currentPrice,
-          qty: pos.size,
-          reason: "Manual Market Exit",
-          pnl: realizedPnl,
-          pnlPercent,
-          time: Date.now(),
-        };
-
-        this.tradeHistory.unshift(tradeRecord);
-        this.emitter.tradeUpdate(tradeRecord);
-        this.telegram.sendTradeClosed(targetSymbol, currentPrice, "Manual Exit", realizedPnl, pnlPercent);
-        dbRecordTrade({ symbol: targetSymbol, side: "Buy", entryPrice: parseFloat(pos.avgPrice || currentPrice.toString()), exitPrice: currentPrice, status: "CLOSED", exitReason: "Manual Exit", realizedPnl, closedAt: Date.now(), sizeNotional: 1000, marginUsed: 100, leverage: this.settings.leverage || 10 });
-
-        delete this.positionState[targetSymbol];
-        this.activePositions = this.activePositions.filter((p) => p.symbol !== targetSymbol);
-        this.emitter.updatePositions(this.activePositions);
-
-        // Immediate background sync
-        setTimeout(() => this.syncPositions(), 500);
-
-        return { success: true, message: `Successfully closed ${targetSymbol} position.` };
-      } else {
-        this.emitter.log(`[${targetSymbol}] Manual Close failed: ${closeRes.retMsg}`);
-        return { success: false, message: closeRes.retMsg || "Bybit rejected close order" };
-      }
+      if (result.retCode !== 0) return { success: false, message: result.retMsg || "Bybit rejected close" };
+      this.activePositions = this.activePositions.filter((p) => p.symbol !== target);
+      delete this.positionState[target];
+      this.emitter.updatePositions(this.activePositions);
+      setTimeout(() => void this.syncPositions(), 500);
+      return { success: true, message: `Successfully closed ${target}.` };
     } catch (err: any) {
-      this.emitter.log(`[${targetSymbol}] Manual Close exception: ${err.message}`);
       return { success: false, message: err.message };
     }
   }
 
-  /**
-   * Emergency Panic Button: Close all active positions immediately at market price
-   */
   public async closeAllPositions(): Promise<{ success: boolean; closedCount: number; results: any[] }> {
-    this.emitter.log("🚨 [EMERGENCY PANIC CLOSE-ALL] Closing all active positions immediately...");
     const results: any[] = [];
     let closedCount = 0;
-
-    // Fetch freshest positions from Bybit
     try {
-      const posRes = await this.bybit.getPositionInfo({ category: "linear", settleCoin: "USDT" });
-      const rawList = posRes.result?.list || [];
-      const activeList = rawList.filter((p: any) => parseFloat(p.size) > 0);
-
-      if (activeList.length === 0) {
-        this.emitter.log("ℹ️ [Panic Close] No open positions to close.");
-        return { success: true, closedCount: 0, results: [] };
-      }
-
-      for (const pos of activeList) {
-        const symbol = pos.symbol;
-        const closeSide = pos.side === "Buy" ? "Sell" : "Buy";
+      const positions = await this.riskManager.getOpenPositions();
+      for (const pos of positions) {
         try {
-          const res = await this.bybit.submitOrder({
+          const result = await this.bybit.submitOrder({
             category: "linear",
-            symbol,
-            side: closeSide,
+            symbol: pos.symbol,
+            side: pos.side === "Buy" ? "Sell" : "Buy",
             orderType: "Market",
-            qty: pos.size,
+            qty: String(pos.size),
             reduceOnly: true,
             timeInForce: "IOC",
           });
-
-          if (res.retCode === 0) {
-            closedCount++;
-            this.emitter.log(`✅ [Panic Close] Successfully closed #${symbol} (${pos.size} contracts)`);
-            results.push({ symbol, success: true, orderId: res.result?.orderId });
-          } else {
-            this.emitter.log(`❌ [Panic Close] Failed to close #${symbol}: ${res.retMsg}`);
-            results.push({ symbol, success: false, error: res.retMsg });
-          }
+          const success = result.retCode === 0;
+          if (success) closedCount++;
+          results.push({ symbol: pos.symbol, success, orderId: result.result?.orderId, error: success ? undefined : result.retMsg });
         } catch (err: any) {
-          results.push({ symbol, success: false, error: err.message });
+          results.push({ symbol: pos.symbol, success: false, error: err.message });
         }
       }
-
-      this.activePositions = [];
-      this.positionState = {};
-      this.emitter.updatePositions([]);
-      setTimeout(() => this.syncPositions(), 800);
-
+      setTimeout(() => void this.syncPositions(), 800);
       return { success: true, closedCount, results };
     } catch (err: any) {
-      this.emitter.log(`❌ [Panic Close] Exception during close-all: ${err.message}`);
       return { success: false, closedCount, results: [{ error: err.message }] };
     }
   }
 
-  /**
-   * Manual Quick Test Long (Market Buy with active TP/SL brackets, bypassing indicators)
-   */
   public async executeManualTestOrder(symbol: string = "BTCUSDT", customQty?: string): Promise<{ success: boolean; message: string; orderId?: string }> {
-    const targetSymbol = symbol.toUpperCase();
-    this.emitter.log(`⚡ [Manual Test Order] Initiating direct Market Buy for ${targetSymbol} (Bypassing indicators)...`);
-
+    const target = symbol.toUpperCase();
+    const notional = this.settings.positionMarginUsdt * this.settings.leverage;
+    const pre = await this.validatePreOrder(target, "Buy", notional);
+    if (!pre.valid) return { success: false, message: pre.reason || "Risk validation failed" };
+    const qty = customQty || pre.qty;
+    const { takeProfit, stopLoss } = this.riskManager.calculateBrackets(pre.price, this.settings.tpPercent, this.settings.slPercent, "Buy");
     try {
-      // 1. Get current market price
-      let currentPrice = this.currentPrices[targetSymbol];
-      if (!currentPrice || isNaN(currentPrice)) {
-        const tickerRes = await this.bybit.getTickers({ category: "linear", symbol: targetSymbol });
-        const tickerData = tickerRes.result?.list?.[0];
-        if (tickerData?.lastPrice) {
-          currentPrice = parseFloat(tickerData.lastPrice);
-          this.currentPrices[targetSymbol] = currentPrice;
-        }
-      }
-
-      if (!currentPrice || isNaN(currentPrice)) {
-        currentPrice = targetSymbol.includes("BTC") ? 80000 : 2500;
-      }
-
-      const notionalSizeUsdt = (this.settings.positionMarginUsdt || 100) * (this.settings.leverage || 10);
-      const preOrder = await this.validatePreOrder(targetSymbol, notionalSizeUsdt);
-      
-      if (!preOrder.valid) {
-        this.emitter.log(`[Manual Test Order] ${preOrder.reason}`);
-        return { success: false, message: preOrder.reason || "Validation failed" };
-      }
-      
-      currentPrice = preOrder.price;
-      const qty = customQty || preOrder.qty;
-
-      // Calculate TP / SL brackets based on user risk settings
-      const { takeProfit, stopLoss } = this.riskManager.calculateBrackets(
-        currentPrice,
-        this.settings.tpPercent,
-        this.settings.slPercent
-      );
-
-      await this.ensureLeverage(targetSymbol);
-
-      this.emitter.log(
-        `⚡ [Manual Test Order] Submitting Bybit Linear Market Buy: ${qty} ${targetSymbol} @ ~${currentPrice.toFixed(2)} | TP: ${takeProfit} (+${this.settings.tpPercent}%) | SL: ${stopLoss} (-${this.settings.slPercent}%)...`
-      );
-
-      const orderRes = await this.bybit.submitOrder({
-        category: "linear",
-        symbol: targetSymbol,
-        side: "Buy",
-        orderType: "Market",
-        qty,
-        timeInForce: "IOC",
-        takeProfit,
-        stopLoss,
+      await this.ensureLeverage(target);
+      const result = await this.bybit.submitOrder({
+        category: "linear", symbol: target, side: "Buy", orderType: "Market", qty,
+        timeInForce: "IOC", takeProfit, stopLoss,
       });
-
-      if (orderRes.retCode === 0) {
-        const orderId = orderRes.result?.orderId || `test-${Date.now()}`;
-        this.emitter.log(`✅ [Manual Test Order] Bybit Demo Order FILLED! Order ID: ${orderId}`);
-        this.emitter.log(`🎯 [Manual Test Order] Active Brackets confirmed on Bybit: TP @ ${takeProfit} | SL @ ${stopLoss}`);
-
-        const buyTrade = {
-          id: orderId,
-          type: "buy",
-          symbol: targetSymbol,
-          price: currentPrice,
-          entryPrice: currentPrice,
-          qty,
-          takeProfit,
-          stopLoss,
-          reason: "Manual Test Over-ride",
-          time: Date.now(),
-        };
-
-        this.telegram.sendTradeExecution(targetSymbol, "Long (Manual Test)", currentPrice, qty, takeProfit, stopLoss);
-        dbRecordTrade({ symbol: targetSymbol, side: "Buy", entryPrice: currentPrice, status: "OPEN", sizeNotional: 1000, marginUsed: 100, leverage: this.settings.leverage || 10 });
-
-        const existing = this.activePositions.find((p) => p.symbol === targetSymbol);
-        if (!existing) {
-          this.activePositions.push({
-            symbol: targetSymbol,
-            side: "Buy",
-            size: qty,
-            avgPrice: currentPrice.toString(),
-            markPrice: currentPrice.toString(),
-          });
-        }
-        this.positionState[targetSymbol] = { peakPrice: currentPrice, breakEvenSet: false };
-        this.emitter.updatePositions(this.activePositions);
-
-        setTimeout(() => this.syncPositions(), 800);
-
-        return {
-          success: true,
-          message: `Successfully executed ${qty} ${targetSymbol} Market Buy on Bybit Demo! (Order ID: ${orderId})`,
-          orderId,
-        };
-      } else {
-        const errMsg = orderRes.retMsg || "Bybit rejected the test order";
-        this.emitter.log(`❌ [Manual Test Order] Rejected by Bybit: ${errMsg} (Code: ${orderRes.retCode})`);
-        return { success: false, message: errMsg };
-      }
+      if (result.retCode !== 0) return { success: false, message: result.retMsg || "Bybit rejected test order" };
+      const orderId = result.result?.orderId || `test-${Date.now()}`;
+      this.activePositions.push({ symbol: target, side: "Buy", size: qty, avgPrice: String(pre.price), markPrice: String(pre.price) });
+      this.positionState[target] = { peakPrice: pre.price, breakEvenSet: false };
+      this.emitter.updatePositions(this.activePositions);
+      dbRecordTrade({ symbol: target, side: "Buy", entryPrice: pre.price, status: "OPEN", sizeNotional: notional, marginUsed: this.settings.positionMarginUsdt, leverage: this.settings.leverage });
+      setTimeout(() => void this.syncPositions(), 800);
+      return { success: true, message: `Test long placed for ${target}`, orderId };
     } catch (err: any) {
-      this.emitter.log(`❌ [Manual Test Order] Exception: ${err.message}`);
       return { success: false, message: err.message };
-    }
-  }
-
-  /**
-   * Automated Execution of Confirmed Scanner Buy Signal
-   */
-  public async executeScannerEntry(
-    symbol: string,
-    price: number,
-    ema9: number,
-    ema21: number,
-    rsi: number
-  ): Promise<{ success: boolean; message: string; orderId?: string }> {
-    if (!this.isRunning) {
-      this.emitter.log(`[Scanner Auto-Execution] Execution skipped for ${symbol}: Bot engine is halted.`);
-      return { success: false, message: "Bot engine is halted" };
-    }
-    const targetSymbol = symbol.toUpperCase();
-    if (this.isProcessingTrade[targetSymbol]) {
-      return { success: false, message: `Trade already in progress for ${targetSymbol}` };
-    }
-
-    this.isProcessingTrade[targetSymbol] = true;
-
-    try {
-      const { takeProfit, stopLoss } = this.riskManager.calculateBrackets(
-        price,
-        this.settings.tpPercent,
-        this.settings.slPercent
-      );
-
-      // Smart position sizing based on Margin and Leverage (Notional = Margin * Leverage)
-      const notionalSizeUsdt = (this.settings.positionMarginUsdt || 100) * (this.settings.leverage || 10);
-      let qtyNum = notionalSizeUsdt / price;
-      let qty = qtyNum.toFixed(3);
-      if (price < 1) qty = Math.floor(qtyNum).toString();
-      else if (price < 10) qty = Math.floor(qtyNum).toString();
-      else if (price < 100) qty = qtyNum.toFixed(1);
-      else if (price < 1000) qty = qtyNum.toFixed(2);
-      else qty = qtyNum.toFixed(3);
-
-      await this.ensureLeverage(targetSymbol);
-
-      this.emitter.log(
-        `⚡ [Scanner Auto-Execution] Submitting Market Buy: ${qty} ${targetSymbol} @ ~$${price.toFixed(2)} | TP: $${takeProfit} (+${this.settings.tpPercent}%) | SL: $${stopLoss} (-${this.settings.slPercent}%)`
-      );
-
-      const orderRes = await this.bybit.submitOrder({
-        category: "linear",
-        symbol: targetSymbol,
-        side: "Buy",
-        orderType: "Market",
-        qty,
-        timeInForce: "IOC",
-        takeProfit,
-        stopLoss,
-      });
-
-      if (orderRes.retCode === 0) {
-        const orderId = orderRes.result?.orderId || `scan-${Date.now()}`;
-        this.emitter.log(`✅ [Scanner Order FILLED] Bybit Demo Order ID: ${orderId}`);
-        this.emitter.log(`🎯 [Scanner TP/SL Active] TP @ $${takeProfit} | SL @ $${stopLoss}`);
-
-        const buyTrade = {
-          id: orderId,
-          type: "buy",
-          symbol: targetSymbol,
-          price,
-          entryPrice: price,
-          qty,
-          takeProfit,
-          stopLoss,
-          reason: `Scanner Bullish Cross (RSI: ${rsi.toFixed(1)})`,
-          time: Date.now(),
-        };
-
-        this.telegram.sendTradeExecution(targetSymbol, "Long (Scanner Auto)", price, qty, takeProfit, stopLoss);
-        dbRecordTrade({ symbol: targetSymbol, side: "Buy", entryPrice: price, status: "OPEN", sizeNotional: 1000, marginUsed: 100, leverage: this.settings.leverage || 10 });
-
-        // Update local active positions list if not present
-        const existing = this.activePositions.find((p) => p.symbol === targetSymbol);
-        if (!existing) {
-          this.activePositions.push({
-            symbol: targetSymbol,
-            side: "Buy",
-            size: qty,
-            avgPrice: price.toString(),
-            markPrice: price.toString(),
-          });
-        }
-        this.positionState[targetSymbol] = { peakPrice: price, breakEvenSet: false };
-        this.emitter.updatePositions(this.activePositions);
-
-        // Add to watchlist and dynamic WS stream if not already monitored
-        if (!this.watchlist.includes(targetSymbol)) {
-          this.addSymbol(targetSymbol);
-        }
-
-        setTimeout(() => this.syncPositions(), 800);
-
-        return {
-          success: true,
-          message: `Scanner successfully executed Market Buy on ${targetSymbol}!`,
-          orderId,
-        };
-      } else {
-        const errMsg = orderRes.retMsg || "Bybit rejected scanner order";
-        this.emitter.log(`❌ [Scanner Entry] Rejected by Bybit: ${errMsg} (Code: ${orderRes.retCode})`);
-        return { success: false, message: errMsg };
-      }
-    } catch (err: any) {
-      this.emitter.log(`❌ [Scanner Entry] Exception: ${err.message}`);
-      return { success: false, message: err.message };
-    } finally {
-      this.isProcessingTrade[targetSymbol] = false;
-    }
-  }
-
-  /**
-   * Event-driven Trailing Stop & Break-Even Evaluation on every price tick
-   */
-  private async checkTrailingStopAndBreakEven(symbol: string, currentPrice: number) {
-    if (this.isProcessingTrade[symbol]) return;
-
-    const pos = this.activePositions.find((p) => p.symbol === symbol && p.side === "Buy");
-    if (!pos) return;
-
-    const entryPrice = parseFloat(pos.avgPrice);
-    if (!entryPrice || entryPrice <= 0) return;
-
-    const pnlPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
-
-    if (!this.positionState[symbol]) {
-      this.positionState[symbol] = { peakPrice: currentPrice, breakEvenSet: false };
-    }
-    const state = this.positionState[symbol];
-
-    // Track Peak Price
-    if (currentPrice > state.peakPrice) {
-      state.peakPrice = currentPrice;
-    }
-
-    // 1. Move SL to Break-Even at +1.0%
-    if (pnlPercent >= 1.0 && !state.breakEvenSet) {
-      this.emitter.log(`[${symbol}] +1.0% Profit hit! Moving SL to Break-Even ($${entryPrice}).`);
-      try {
-        await this.bybit.setTradingStop({
-          category: "linear",
-          symbol,
-          stopLoss: entryPrice.toString(),
-          slTriggerBy: "LastPrice",
-          positionIdx: 0,
-        });
-        state.breakEvenSet = true;
-      } catch (err: any) {
-        this.emitter.log(`[${symbol}] Break-Even SL update error: ${err.message}`);
-      }
-    }
-
-    // 2. Dynamic Trailing Stop calculation
-    if (pnlPercent >= 1.0) {
-      const dynamicSl = state.peakPrice * (1 - this.settings.trailingStopPercent / 100);
-      if (currentPrice <= dynamicSl) {
-        this.isProcessingTrade[symbol] = true;
-        this.emitter.log(
-          `[${symbol}] Trailing Stop triggered at $${currentPrice.toFixed(2)} (Peak: $${state.peakPrice.toFixed(2)}). Submitting IOC Market Close...`
-        );
-
-        try {
-          const closeRes = await this.bybit.submitOrder({
-            category: "linear",
-            symbol,
-            side: "Sell",
-            orderType: "Market",
-            qty: pos.size,
-            reduceOnly: true,
-            timeInForce: "IOC",
-          });
-
-          if (closeRes.retCode === 0) {
-            const realizedPnl = (currentPrice - entryPrice) * parseFloat(pos.size);
-            const closeTrade = {
-              id: closeRes.result?.orderId || `ts-${Date.now()}`,
-              symbol,
-              side: pos.side,
-              entryPrice,
-              exitPrice: currentPrice,
-              qty: pos.size,
-              reason: "Trailing Stop",
-              pnl: realizedPnl,
-              pnlPercent,
-              time: Date.now(),
-            };
-
-            this.tradeHistory.unshift(closeTrade);
-            this.emitter.tradeUpdate(closeTrade);
-            this.telegram.sendTradeClosed(symbol, currentPrice, "Trailing Stop", realizedPnl, pnlPercent);
-            dbRecordTrade({ symbol, side: "Buy", entryPrice: parseFloat(pos.avgPrice || currentPrice.toString()), exitPrice: currentPrice, status: "CLOSED", exitReason: "Trailing Stop", realizedPnl, closedAt: Date.now(), sizeNotional: 1000, marginUsed: 100, leverage: this.settings.leverage || 10 });
-            delete this.positionState[symbol];
-
-            // Update in-memory positions list
-            this.activePositions = this.activePositions.filter((p) => p.symbol !== symbol);
-            this.emitter.updatePositions(this.activePositions);
-            setTimeout(() => this.syncPositions(), 500);
-          } else {
-            this.emitter.log(`[${symbol}] Trailing Stop close error: ${closeRes.retMsg}`);
-          }
-        } catch (err: any) {
-          this.emitter.log(`[${symbol}] Trailing Stop execution exception: ${err.message}`);
-        } finally {
-          this.isProcessingTrade[symbol] = false;
-        }
-      }
-    }
-  }
-
-  /**
-   * Event-driven Strategy Evaluation on live 1m Kline events
-   */
-  private async evaluateStrategySignal(
-    symbol: string,
-    currentPrice: number,
-    technicals: KlineEventPayload["technicals"],
-    isConfirmed: boolean
-  ) {
-    if (this.isProcessingTrade[symbol]) return;
-
-    const { ema9, prevEma9, ema21, prevEma21, rsi, prevRsi } = technicals;
-
-    const isBullishTrend = ema9 > ema21;
-    const isBullishCross = prevEma9 <= prevEma21 && ema9 > ema21;
-    const isBearishCross = prevEma9 >= prevEma21 && ema9 < ema21;
-    const isRsiRecovering = prevRsi < 30 && rsi >= 30;
-
-    const symbolPosition = this.activePositions.find((p) => p.symbol === symbol);
-
-    // Diagnostic logging for condition check
-    const now = Date.now();
-    const lastLog = this.lastCheckLogTime[symbol] || 0;
-    const shouldLogCondition = (now - lastLog >= 15000) || isConfirmed;
-
-    let reasonStr = "";
-    if (symbolPosition) {
-      const entryP = parseFloat(symbolPosition.avgPrice);
-      const pnlPct = ((currentPrice - entryP) / entryP) * 100;
-      reasonStr = `Holding Active Position (PnL: ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)`;
-    } else if (!isBullishTrend && !isBullishCross && !isRsiRecovering) {
-      reasonStr = `EMA9: $${ema9.toFixed(2)} < EMA21: $${ema21.toFixed(2)} -> Waiting for Bullish Cross`;
-    } else if (rsi >= 65) {
-      reasonStr = `RSI: ${rsi.toFixed(1)} (Overbought, needs <65) | EMA9: $${ema9.toFixed(2)} > EMA21: $${ema21.toFixed(2)} -> Waiting for RSI cooldown`;
-    } else if (rsi < 30 && !isRsiRecovering) {
-      reasonStr = `RSI: ${rsi.toFixed(1)} (Oversold) -> Waiting for RSI recovery >= 30`;
-    } else {
-      reasonStr = `Bullish Setup Confirmed (EMA9 > EMA21, RSI: ${rsi.toFixed(1)}) -> Ready for Entry`;
-    }
-
-    if (shouldLogCondition) {
-      this.lastCheckLogTime[symbol] = now;
-      this.emitter.log(`[${symbol} Check] RSI: ${rsi.toFixed(1)} (needs <65) | EMA9: $${ema9.toFixed(2)} vs EMA21: $${ema21.toFixed(2)} -> ${reasonStr}`);
-    }
-
-    let shouldBuy = false;
-    let shouldSell = false;
-
-    // Entry Criteria: Bullish EMA cross with RSI < 65 OR RSI recovery with EMA9 >= EMA21 OR Confirmed Bullish Trend with RSI in safe zone (30-65)
-    if ((isBullishCross && rsi < 65) || (isRsiRecovering && ema9 >= ema21) || (isBullishTrend && rsi >= 35 && rsi < 62 && isConfirmed)) {
-      shouldBuy = true;
-    }
-
-    // Exit Criteria: Bearish cross or overbought RSI
-    if (isBearishCross || rsi > 75) {
-      shouldSell = true;
-    }
-
-    // 1. Exit Signal on active position
-    if (symbolPosition && shouldSell) {
-      this.isProcessingTrade[symbol] = true;
-      this.emitter.log(`[Strategy Exit] Exit signal triggered for ${symbol} @ $${currentPrice} (RSI: ${rsi.toFixed(1)}). Closing position...`);
-
-      try {
-        const closeRes = await this.bybit.submitOrder({
-          category: "linear",
-          symbol,
-          side: symbolPosition.side === "Buy" ? "Sell" : "Buy",
-          orderType: "Market",
-          qty: symbolPosition.size,
-          reduceOnly: true,
-          timeInForce: "IOC",
-        });
-
-        if (closeRes.retCode === 0) {
-          this.emitter.log(`[${symbol}] Strategy exit successful! Order ID: ${closeRes.result?.orderId}`);
-          const entryPrice = parseFloat(symbolPosition.avgPrice);
-          const realizedPnl =
-            (currentPrice - entryPrice) *
-            parseFloat(symbolPosition.size) *
-            (symbolPosition.side === "Buy" ? 1 : -1);
-          const pnlPercent =
-            ((currentPrice - entryPrice) / entryPrice) *
-            100 *
-            (symbolPosition.side === "Buy" ? 1 : -1);
-
-          const exitTrade = {
-            id: closeRes.result?.orderId || `exit-${Date.now()}`,
-            symbol,
-            side: symbolPosition.side,
-            entryPrice,
-            exitPrice: currentPrice,
-            qty: symbolPosition.size,
-            reason: "Strategy Exit",
-            pnl: realizedPnl,
-            pnlPercent,
-            time: Date.now(),
-          };
-
-          this.tradeHistory.unshift(exitTrade);
-          this.emitter.tradeUpdate(exitTrade);
-          this.telegram.sendTradeClosed(symbol, currentPrice, "Strategy Exit", realizedPnl, pnlPercent);
-          dbRecordTrade({ symbol, side: "Buy", entryPrice: parseFloat(symbolPosition.avgPrice || currentPrice.toString()), exitPrice: currentPrice, status: "CLOSED", exitReason: "Strategy Exit", realizedPnl, closedAt: Date.now(), sizeNotional: 1000, marginUsed: 100, leverage: this.settings.leverage || 10 });
-          delete this.positionState[symbol];
-
-          this.activePositions = this.activePositions.filter((p) => p.symbol !== symbol);
-          this.emitter.updatePositions(this.activePositions);
-          setTimeout(() => this.syncPositions(), 500);
-        } else {
-          this.emitter.log(`[${symbol}] Strategy Exit order rejected: ${closeRes.retMsg}`);
-        }
-      } catch (err: any) {
-        this.emitter.log(`[${symbol}] Strategy Exit exception: ${err.message}`);
-      } finally {
-        this.isProcessingTrade[symbol] = false;
-      }
-    }
-    // 2. Entry Signal: Allowed if NOT currently in position for this symbol AND active positions count < maxPositions
-    else if (!symbolPosition && shouldBuy) {
-      const maxSlots = this.settings.maxPositions || 5;
-      if (this.activePositions.length >= maxSlots) {
-        if (shouldLogCondition) {
-          this.emitter.log(`[Strategy] Long signal for ${symbol} skipped: All ${maxSlots} active position slots are occupied.`);
-        }
-        return;
-      }
-
-      this.isProcessingTrade[symbol] = true;
-      this.emitter.log(`[Strategy] Long signal approved for ${symbol} @ ${currentPrice} (Slot ${this.activePositions.length + 1}/${maxSlots}). Placing Market Buy...`);
-
-      try {
-        const notionalSizeUsdt = (this.settings.positionMarginUsdt || 100) * (this.settings.leverage || 10);
-        const preOrder = await this.validatePreOrder(symbol, notionalSizeUsdt);
-        
-        if (!preOrder.valid) {
-          this.emitter.log(`[Strategy] ${preOrder.reason}`);
-          return;
-        }
-        
-        currentPrice = preOrder.price;
-        const qty = preOrder.qty;
-
-        const { takeProfit, stopLoss } = this.riskManager.calculateBrackets(
-          currentPrice,
-          this.settings.tpPercent,
-          this.settings.slPercent
-        );
-
-        await this.ensureLeverage(symbol);
-
-        const orderRes = await this.bybit.submitOrder({
-          category: "linear",
-          symbol,
-          side: "Buy",
-          orderType: "Market",
-          qty,
-          timeInForce: "IOC",
-          takeProfit,
-          stopLoss,
-        });
-
-        if (orderRes.retCode === 0) {
-          this.emitter.log(`[${symbol}] Buy order filled! Order ID: ${orderRes.result?.orderId}`);
-          this.emitter.log(
-            `[${symbol}] Brackets set: TP @ ${takeProfit} (+${this.settings.tpPercent}%), SL @ ${stopLoss} (-${this.settings.slPercent}%)`
-          );
-
-          const buyTrade = {
-            id: orderRes.result?.orderId || `buy-${Date.now()}`,
-            type: "buy",
-            symbol,
-            price: currentPrice,
-            entryPrice: currentPrice,
-            qty,
-            takeProfit,
-            stopLoss,
-            time: Date.now(),
-          };
-
-          this.telegram.sendTradeExecution(symbol, "Long", currentPrice, qty, takeProfit, stopLoss);
-          dbRecordTrade({ symbol, side: "Buy", entryPrice: currentPrice, status: "OPEN", sizeNotional: 1000, marginUsed: 100, leverage: this.settings.leverage || 10 });
-
-          this.activePositions.push({
-            symbol,
-            side: "Buy",
-            size: qty,
-            avgPrice: currentPrice.toString(),
-            markPrice: currentPrice.toString(),
-          });
-          this.positionState[symbol] = { peakPrice: currentPrice, breakEvenSet: false };
-          this.emitter.updatePositions(this.activePositions);
-
-          // Background sync to fetch Bybit order ID and leverage details
-          setTimeout(() => this.syncPositions(), 1000);
-        } else {
-          this.emitter.log(`[${symbol}] Buy order rejected: ${orderRes.retMsg}`);
-        }
-      } catch (err: any) {
-        this.emitter.log(`[${symbol}] Buy order exception: ${err.message}`);
-      } finally {
-        this.isProcessingTrade[symbol] = false;
-      }
     }
   }
 
   public shutdown() {
-    if (this.syncTimer) {
-      clearInterval(this.syncTimer);
-      this.syncTimer = null;
-    }
+    if (this.syncTimer) clearInterval(this.syncTimer);
+    this.syncTimer = null;
     this.stop();
     this.wsManager.close();
   }
