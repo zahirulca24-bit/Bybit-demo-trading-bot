@@ -9,8 +9,6 @@ import {
   RefreshCw,
   ShieldAlert,
   Target,
-  TrendingDown,
-  TrendingUp,
   XCircle,
   Zap,
 } from "lucide-react";
@@ -129,7 +127,7 @@ export function ActiveTradesPage({
     }
   }, [positions]);
 
-  const { totalPositionValue, totalMargin, calculatedRoi } = activePositions.reduce(
+  const { totalPositionValue, totalMargin } = activePositions.reduce(
     (acc, pos) => {
       const pnl = Number(pos.unrealisedPnl || 0);
       const price = Number(pos.markPrice || pos.avgPrice || 0);
@@ -149,7 +147,6 @@ export function ActiveTradesPage({
   const totalRealizedPnl = Number(analytics.realizedPnlToday || 0);
   const totalUnrealizedPnl = Number(analytics.unrealizedPnlToday || 0);
   const netDailyPnl = Number(analytics.netDailyPnl || 0);
-  const isPnlPositive = totalUnrealizedPnl >= 0;
   const isNetPositive = netDailyPnl >= 0;
   const maxLossLimit = settings?.globalMaxLossUsdt ?? -50;
   const isApproachingLimit = netDailyPnl <= maxLossLimit * 0.8;
