@@ -4,7 +4,7 @@ This project runs as a Node.js web service on Render and is configured for Bybit
 
 ## Final Strict 6-Gate + Risk Rules
 
-**Last updated:** Tuesday, 08 September 2026 — 06:38 PM (Asia/Dhaka)
+**Last updated:** Tuesday, 08 September 2026 — Asia/Dhaka
 
 The frontend blueprint and production runtime are aligned to these strict automated-entry rules:
 
@@ -26,9 +26,40 @@ The frontend blueprint and production runtime are aligned to these strict automa
 - **Stop-loss discipline:** SL may be tightened but must **never be widened**.
 - **Legacy entry path:** loose legacy auto-entry remains disabled; automated entries use the strict confirmed scanner path.
 
+## UTC Trading-Day Stats
+
+Trading-day analytics and daily risk accounting use one shared UTC day window:
+
+**00:00:00.000 UTC → now**
+
+At every new UTC day, the following values naturally start fresh because they are calculated only from records inside the new UTC window:
+
+- Today's Total Opened
+- Closed Trades Today
+- Wins / Losses Today
+- TP / SL / Trailing / Manual / Other exits Today
+- Realized PnL Today
+- live Unrealized PnL
+- Net Daily PnL
+- the **-$50 daily entry circuit breaker** calculation
+
+This daily reset is an accounting/window reset only. It does **not** delete trade history, alter Bybit wallet balance/equity, close positions, stop the bot, disable scanner auto-trade, or reset strict settings.
+
+Active positions remain live across midnight. A position opened yesterday and still open today remains an active position, but it is **not** counted as "Opened Today". A position opened yesterday and closed today contributes to **Closed Trades Today** and **Realized PnL Today**, but not to **Opened Today**.
+
+Exit categories are mutually exclusive. Each closed-today trade is classified as exactly one of **TP**, **SL**, **Trailing**, **Manual**, or **Other / Unknown**. When reliable exit-reason metadata is unavailable, analytics use **Other / Unknown** instead of inferring an exit from PnL or fabricating a cause.
+
+The daily circuit breaker uses this same UTC boundary. Therefore, a prior day's realized loss (for example **-$60**) does not keep the next UTC day's entries blocked. At 00:00 UTC, realized daily PnL starts from the new day's records, while current open-position unrealized PnL remains live in net daily risk accounting.
+
+### Consecutive-loss pause semantics
+
+The strict **3 consecutive losses => 30-minute new-entry pause** remains a **rolling timestamp-based rule across UTC midnight**. It is intentionally separate from UTC daily PnL accounting and expires naturally 30 minutes after the latest qualifying loss sequence. This PR does not weaken or change that behavior.
+
 ## Performance Baseline Reset
 
 The History / Analytics view includes a clearly separate action named **Reset Performance Baseline**. It is an analytics-only reset for comparing strategy performance from a chosen point forward.
+
+**Performance Baseline Reset is independent from UTC daily trading stats.** Resetting a performance baseline at any time does not reset Today's counters, daily PnL, or the daily breaker. Likewise, crossing 00:00 UTC does not remove or replace the active Reset # baseline.
 
 A baseline reset:
 
