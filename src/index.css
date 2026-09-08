@@ -1,1 +1,43 @@
 @import "tailwindcss";
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+}
+
+html,
+body {
+  overflow-x: hidden;
+  background: #0a0a0a;
+}
+
+@media (max-width: 1023px) {
+  #root > div > div.flex-1.ml-64 {
+    margin-left: 0 !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100vw !important;
+    padding: 1rem !important;
+    padding-bottom: calc(6rem + env(safe-area-inset-bottom)) !important;
+    overflow-x: hidden !important;
+  }
+
+  #root > div > div.flex-1.ml-64 > div {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    max-width: 100%;
+  }
+
+  table {
+    min-width: max-content;
+  }
+}
