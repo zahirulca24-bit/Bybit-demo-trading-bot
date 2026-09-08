@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bybit Demo Trading Bot</title>
+    <meta name="description" content="A Node.js backend application for a Bybit Demo Trading Bot using the official Bybit V5 API." />
+    <meta property="og:title" content="Bybit Demo Trading Bot" />
+    <meta property="og:description" content="A Node.js backend application for a Bybit Demo Trading Bot using the official Bybit V5 API." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // Suppress benign Vite HMR WebSocket connection errors when HMR is disabled
+      window.addEventListener('unhandledrejection', (event) => {
+        if (event.reason && typeof event.reason.message === 'string' && (event.reason.message.includes('WebSocket closed without opened') || event.reason.message.includes('failed to connect to websocket'))) {
+          event.preventDefault();
+        }
+      });
+      const originalConsoleError = console.error;
+      console.error = function(...args) {
+        if (args[0] && typeof args[0] === 'string' && args[0].includes('[vite] failed to connect to websocket')) {
+          return;
+        }
+        originalConsoleError.apply(console, args);
+      };
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: bybit-demo-trading-bot
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: BYBIT_DEMO
+        value: "true"
+      - key: BYBIT_API_KEY
+        sync: false
+      - key: BYBIT_API_SECRET
+        sync: false
+      - key: APP_SECRET
+        generateValue: true
