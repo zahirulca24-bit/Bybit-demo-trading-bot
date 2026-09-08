@@ -4,6 +4,7 @@ import { TelegramNotifier } from "./TelegramNotifier";
 import { BybitWebSocketManager, KlineEventPayload, TickerEventPayload } from "./BybitWebSocketManager";
 import { MarketScanner } from "./MarketScanner";
 import { dbRecordTrade } from "../db";
+import { getUtcDayStartMs, normalizeTimestampMs } from "../utils/utcTradingDay";
 
 export class WebSocketEmitter {
   private lastPriceEmit = 0;
@@ -197,7 +198,7 @@ export class TradingEngine {
   }
 
   private extractClosedTime(item: any): number {
-    return Number(item.updatedTime || item.createdTime || item.execTime || 0);
+    return normalizeTimestampMs(item.updatedTime || item.execTime || item.createdTime);
   }
 
   private async getDailyRiskSnapshot() {
@@ -205,15 +206,14 @@ export class TradingEngine {
       this.riskManager.getOpenPositions(),
       this.bybit.getClosedPnL({ category: "linear", limit: 100 }).catch(() => null),
     ]);
-    const start = new Date();
-    start.setUTCHours(0, 0, 0, 0);
+    const startMs = getUtcDayStartMs();
     const closed = closedRes?.retCode === 0 ? (closedRes.result?.list || []) : [];
     const realized = closed.reduce((sum: number, item: any) => {
       const t = this.extractClosedTime(item);
-      return t >= start.getTime() ? sum + Number(item.closedPnl || 0) : sum;
+      return t >= startMs ? sum + Number(item.closedPnl || 0) : sum;
     }, 0);
     const unrealized = positions.reduce((sum: number, pos: any) => sum + Number(pos.unrealisedPnl || 0), 0);
-    return { positions, closed, realized, unrealized, net: realized + unrealized };
+    return { positions, closed, realized, unrealized, net: realized + unrealized, dayStartMs: startMs };
   }
 
   public async canOpenSymbol(symbol: string): Promise<{ allowed: boolean; reason?: string }> {
@@ -237,6 +237,8 @@ export class TradingEngine {
         return { allowed: false, reason: `Daily circuit breaker active: net PnL $${snapshot.net.toFixed(2)} <= $${dailyLimit.toFixed(2)}` };
       }
 
+      // The 3-loss pause is intentionally a rolling 30-minute rule across UTC midnight.
+      // It is separate from daily PnL accounting and naturally expires by timestamp.
       const ordered = [...snapshot.closed].sort((a: any, b: any) => this.extractClosedTime(b) - this.extractClosedTime(a));
       const lastThree = ordered.slice(0, 3);
       if (lastThree.length === 3 && lastThree.every((t: any) => Number(t.closedPnl || 0) < 0)) {
@@ -275,7 +277,7 @@ export class TradingEngine {
           this.emitter.log(`🚨 [DAILY ENTRY BREAKER] Net daily PnL $${snapshot.net.toFixed(2)} reached $${limit.toFixed(2)}. New entries blocked; existing positions remain managed.`);
           this.telegram.send(`🚨 <b>DAILY ENTRY BREAKER</b>\nNet daily PnL: <b>$${snapshot.net.toFixed(2)}</b>. New entries are blocked; open positions continue to be managed.`);
         } else {
-          this.emitter.log("✅ [DAILY ENTRY BREAKER] Risk condition cleared; new entries may resume if all other rules pass.");
+          this.emitter.log("✅ [DAILY ENTRY BREAKER] UTC trading-day risk condition cleared; new entries may resume if all other rules pass.");
         }
       }
     } catch {
