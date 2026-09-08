@@ -13,6 +13,7 @@ type OiMetric = {
   oi: number;
   oiChange1h: number;
   timestamp: number;
+  available: boolean;
 };
 
 export class SixGateFilteringPipeline {
@@ -146,7 +147,7 @@ export class SixGateFilteringPipeline {
       const g6Passed = g5Passed.filter((s) => s.gates.gate6_rsi.passed);
 
       const gateSummaries: PipelineGateSummary[] = [
-        this.summary(1, "24h Volume / Turnover", "Min $10M 24h turnover", validPairs.length, g1Passed.length, "Passed"),
+        this.summary(1, "24h Volume / Turnover", "Min $10M 24h turnover", scannedSymbols.length, g1Passed.length, "Passed"),
         this.summary(2, "15m HTF Trend Structure (EMA 50/200)", "Confirmed 15m EMA 50/200 structure", g1Passed.length, g2Passed.length),
         this.summary(3, "Orderbook Spread", "Fresh scan spread <= 0.15%", g2Passed.length, g3Passed.length),
         this.summary(4, "5m Volatility (ATR)", "Confirmed 5m ATR >= 0.30%", g3Passed.length, g4Passed.length),
@@ -163,7 +164,7 @@ export class SixGateFilteringPipeline {
         return b.turnover24h - a.turnover24h;
       });
 
-      this.state = { totalDiscovered: validPairs.length, passedAllCount: g6Passed.length, activeSignalsCount: g6Passed.length, gates: gateSummaries, symbols: scannedSymbols.slice(0, 20), lastScanTimestamp: Date.now(), isScanning: false };
+      this.state = { totalDiscovered: scannedSymbols.length, passedAllCount: g6Passed.length, activeSignalsCount: g6Passed.length, gates: gateSummaries, symbols: scannedSymbols.slice(0, 20), lastScanTimestamp: Date.now(), isScanning: false };
       return this.state;
     } catch (err: any) {
       console.error("[Pipeline] Pipeline execution error:", err?.message || err);
@@ -224,7 +225,7 @@ export class SixGateFilteringPipeline {
       const currentAtr = atrValues[atrValues.length - 1];
       const atr5mPercent = (currentAtr / confirmedPrice) * 100;
       const isAtrValid = atr5mPercent >= this.minAtrPercent;
-      const isOiValid = Number.isFinite(oiMetric.oiChange1h) && oiMetric.oiChange1h >= 0;
+      const isOiValid = oiMetric.available && oiMetric.oiChange1h >= 0;
 
       const rsiValues = RSI.calculate({ period: 14, values: closes5m });
       if (!rsiValues.length) return null;
@@ -260,12 +261,12 @@ export class SixGateFilteringPipeline {
         gate2_trend: { passed: isTrend15mValid, valueDisplay: trend15m, detail: trend15m === "Bullish HTF" ? "Confirmed 15m EMA 50 > 200" : trend15m === "Bearish HTF" ? "Confirmed 15m EMA 50 < 200" : "No confirmed HTF trend" },
         gate3_spread: { passed: isSpreadValid, valueDisplay: Number.isFinite(spreadPercent) ? `${spreadPercent.toFixed(3)}%` : "N/A", detail: isSpreadValid ? "Fresh tight book (<=0.15%)" : "Book unavailable or spread too wide" },
         gate4_atr: { passed: isAtrValid, valueDisplay: `${atr5mPercent.toFixed(2)}%`, detail: isAtrValid ? "Confirmed 5m ATR >=0.30%" : "Confirmed 5m ATR below 0.30%" },
-        gate5_oi: { passed: isOiValid, valueDisplay: Number.isFinite(oiMetric.oiChange1h) ? `${oiMetric.oiChange1h >= 0 ? "+" : ""}${oiMetric.oiChange1h.toFixed(2)}%` : "N/A", detail: isOiValid ? "Real 1h OI inflow/non-negative" : "Real 1h OI negative or unavailable" },
+        gate5_oi: { passed: isOiValid, valueDisplay: oiMetric.available ? `${oiMetric.oiChange1h >= 0 ? "+" : ""}${oiMetric.oiChange1h.toFixed(2)}%` : "N/A", detail: isOiValid ? "Real 1h OI inflow/non-negative" : "Real 1h OI negative or unavailable" },
         gate6_rsi: { passed: isRsi5mValid, valueDisplay: `${currentRsi5m.toFixed(1)} (${rsiZone5m})`, detail: isRsi5mValid ? "Confirmed 5m candle in entry zone" : "Confirmed 5m candle outside entry zone" },
         passedAll, failedGateNumber, failedGateName,
       };
 
-      return { symbol, price: confirmedPrice, turnover24h, turnoverFormatted: this.formatTurnover(turnover24h), ema50_15m: currentEma50_15m, ema200_15m: currentEma200_15m, trend15m, isTrend15mValid, bidPrice, askPrice, spreadPercent, isSpreadValid, atr5m: currentAtr, atr5mPercent, isAtrValid, openInterest: oiMetric.oi, oiChangePercent1h: oiMetric.oiChange1h, isOiValid, rsi14_5m: currentRsi5m, rsiZone5m, isRsi5mValid, gates: gateResults, pipelineStatus, signalAction, actionType, lastUpdated: Date.now() };
+      return { symbol, price: confirmedPrice, turnover24h, turnoverFormatted: this.formatTurnover(turnover24h), ema50_15m: currentEma50_15m, ema200_15m: currentEma200_15m, trend15m, isTrend15mValid, bidPrice, askPrice, spreadPercent, isSpreadValid, atr5m: currentAtr, atr5mPercent, isAtrValid, openInterest: oiMetric.oi, oiChangePercent1h: oiMetric.available ? oiMetric.oiChange1h : 0, isOiValid, rsi14_5m: currentRsi5m, rsiZone5m, isRsi5mValid, gates: gateResults, pipelineStatus, signalAction, actionType, lastUpdated: Date.now() };
     } catch (err: any) {
       console.warn(`[Pipeline] Failed to evaluate symbol: ${err?.message || err}`);
       return null;
@@ -287,12 +288,12 @@ export class SixGateFilteringPipeline {
       const previousOi = Number(rows[rows.length - 2].openInterest || 0);
       const currentOi = Number(rows[rows.length - 1].openInterest || 0);
       if (!(previousOi > 0) || !(currentOi > 0)) throw new Error("Invalid OI history");
-      const metric: OiMetric = { oi: currentOi, oiChange1h: ((currentOi - previousOi) / previousOi) * 100, timestamp: Date.now() };
+      const metric: OiMetric = { oi: currentOi, oiChange1h: ((currentOi - previousOi) / previousOi) * 100, timestamp: Date.now(), available: true };
       this.oiCache.set(symbol, metric);
       return metric;
     } catch (err: any) {
       console.warn(`[Pipeline] OI unavailable for ${symbol}: ${err?.message || err}`);
-      return { oi: 0, oiChange1h: Number.NaN, timestamp: Date.now() };
+      return { oi: 0, oiChange1h: 0, timestamp: Date.now(), available: false };
     }
   }
 
