@@ -101,6 +101,7 @@ export function HistoryPage({ history, startingBalance = 1000 }: HistoryPageProp
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-white mb-2">Trade History & Performance Baseline</h1>
           <p className="text-neutral-400">Reset analytics to zero from a snapshot without changing Bybit balance, bot/scanner state, settings, or trade history.</p>
+          <p className="text-xs text-blue-300 mt-2">Performance Baseline is independent from UTC daily trading stats.</p>
         </div>
         <button onClick={resetPerformanceBaseline} disabled={resetting || walletBalance <= 0} className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-2.5 text-sm font-semibold text-white">
           {resetting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
