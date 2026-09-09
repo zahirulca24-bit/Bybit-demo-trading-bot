@@ -1,348 +1,142 @@
 import { Pool, neonConfig } from '@neondatabase/serverless';
 import ws from 'ws';
 
-// Configure Neon to use Node.js WebSocket for serverless driver if needed
 neonConfig.webSocketConstructor = ws;
-
 let pool: Pool | null = null;
 let isConnected = false;
+let persistentDbConfigured = false;
 
-// In-memory fallback store when DATABASE_URL is missing
-class InMemoryStore {
-  private trades: any[] = [];
-  private settings: Map<string, any> = new Map();
-
-  async init() {
-    console.warn("⚠️ [Database] DATABASE_URL is not defined. Falling back to in-memory mock store.");
-  }
-
-  async recordTrade(trade: {
-    symbol: string;
-    side: string;
-    entryPrice: number;
-    exitPrice?: number;
-    sizeNotional?: number;
-    marginUsed?: number;
-    leverage?: number;
-    status: string;
-    exitReason?: string;
-    realizedPnl?: number;
-    closedAt?: number;
-    entryDiagnostics?: Record<string, any>;
-    exitAudit?: Record<string, any>;
-    source?: 'auto' | 'manual' | 'external' | 'unknown';
-    openingOrderId?: string | null;
-    openingOrderLinkId?: string | null;
-    closingOrderId?: string | null;
-    closingOrderLinkId?: string | null;
-  }) {
-    const existingIndex = this.trades.findIndex(t => t.symbol === trade.symbol && t.status === 'OPEN');
-    if (trade.status === 'OPEN') {
-      if (existingIndex === -1) {
-        this.trades.unshift({
-          id: Date.now(),
-          ...trade,
-          opened_at: new Date().toISOString(),
-          closed_at: null
-        });
-      }
-    } else {
-      // CLOSED
-      if (existingIndex !== -1) {
-        this.trades[existingIndex] = {
-          ...this.trades[existingIndex],
-          exit_price: trade.exitPrice,
-          status: 'CLOSED',
-          exit_reason: trade.exitReason,
-          realized_pnl: trade.realizedPnl,
-          closed_at: trade.closedAt ? new Date(trade.closedAt).toISOString() : new Date().toISOString(),
-          exitAudit: trade.exitAudit
-        };
-      } else {
-        this.trades.unshift({
-          id: Date.now(),
-          ...trade,
-          status: 'CLOSED',
-          opened_at: new Date().toISOString(),
-          closed_at: trade.closedAt ? new Date(trade.closedAt).toISOString() : new Date().toISOString(),
-          exitAudit: trade.exitAudit
-        });
-      }
-    }
-  }
-
-  async getClosedTrades() {
-    return this.trades.filter(t => t.status === 'CLOSED').sort((a, b) => new Date(b.closed_at || 0).getTime() - new Date(a.closed_at || 0).getTime());
-  }
-
-  async getSettings(key: string) {
-    return this.settings.get(key) || null;
-  }
-
-  async saveSettings(key: string, value: any) {
-    this.settings.set(key, value);
-  }
+export interface PersistedTradeInput {
+  symbol: string; side: string;
+  entryPrice?: number | null; exitPrice?: number | null;
+  submittedQty?: number | string | null; actualQty?: number | string | null;
+  sizeNotional?: number | null; marginUsed?: number | null; leverage?: number | null;
+  status: string; exitReason?: string | null; realizedPnl?: number | null;
+  openedAt?: number | null; closedAt?: number | null;
+  entryDiagnostics?: Record<string, any> | null; exitAudit?: Record<string, any> | null;
+  source?: 'auto' | 'manual' | 'external' | 'unknown';
+  openingOrderId?: string | null; openingOrderLinkId?: string | null;
+  closingOrderId?: string | null; closingOrderLinkId?: string | null;
 }
 
+function finiteOrNull(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value); return Number.isFinite(n) ? n : null;
+}
+export function normalizeStoredTrade(row: any) {
+  return {
+    id: String(row.id), symbol: String(row.symbol || ''), side: String(row.side || ''),
+    entryPrice: finiteOrNull(row.entry_price ?? row.entryPrice), exitPrice: finiteOrNull(row.exit_price ?? row.exitPrice),
+    submittedQty: finiteOrNull(row.submitted_qty ?? row.submittedQty), actualQty: finiteOrNull(row.actual_qty ?? row.actualQty),
+    qty: finiteOrNull(row.actual_qty ?? row.actualQty), sizeNotional: finiteOrNull(row.size_notional ?? row.sizeNotional),
+    marginUsed: finiteOrNull(row.margin_used ?? row.marginUsed), leverage: finiteOrNull(row.leverage), status: String(row.status || ''),
+    exitReason: row.exit_reason ?? row.exitReason ?? null, realizedPnl: finiteOrNull(row.realized_pnl ?? row.realizedPnl),
+    openedAt: row.opened_at instanceof Date ? row.opened_at.getTime() : row.opened_at ? new Date(row.opened_at).getTime() : finiteOrNull(row.openedAt),
+    closedAt: row.closed_at instanceof Date ? row.closed_at.getTime() : row.closed_at ? new Date(row.closed_at).getTime() : finiteOrNull(row.closedAt),
+    entryDiagnostics: row.entry_diagnostics ?? row.entryDiagnostics ?? null, exitAudit: row.exit_audit ?? row.exitAudit ?? null,
+    source: row.source || 'unknown', openingOrderId: row.opening_order_id ?? row.openingOrderId ?? null,
+    openingOrderLinkId: row.opening_order_link_id ?? row.openingOrderLinkId ?? null,
+    closingOrderId: row.closing_order_id ?? row.closingOrderId ?? null, closingOrderLinkId: row.closing_order_link_id ?? row.closingOrderLinkId ?? null,
+  };
+}
+
+class InMemoryStore {
+  private trades: any[] = []; private settings = new Map<string, any>(); private nextId = 1;
+  async init() { console.warn('⚠️ [Database] DATABASE_URL not configured. Using intentional non-persistent metadata mode.'); }
+  async recordTrade(trade: PersistedTradeInput) {
+    const openId = trade.openingOrderId || null, openLink = trade.openingOrderLinkId || null;
+    if (trade.status === 'OPEN') {
+      const existing = this.trades.find(r => (openId && r.openingOrderId === openId) || (openLink && r.openingOrderLinkId === openLink));
+      if (existing) return { ok: true, id: String(existing.id) };
+      if (!openId && !openLink) return { ok: false, error: 'Open metadata requires stable order identity' };
+      const row = { id: this.nextId++, ...trade, entryPrice: finiteOrNull(trade.entryPrice), exitPrice: null, submittedQty: finiteOrNull(trade.submittedQty), actualQty: finiteOrNull(trade.actualQty), sizeNotional: finiteOrNull(trade.sizeNotional), marginUsed: finiteOrNull(trade.marginUsed), leverage: finiteOrNull(trade.leverage), realizedPnl: null, openedAt: trade.openedAt ?? Date.now(), closedAt: null, openingOrderId: openId, openingOrderLinkId: openLink };
+      this.trades.unshift(row); return { ok: true, id: String(row.id) };
+    }
+    const match = this.trades.find(r => (openId && r.openingOrderId === openId) || (trade.closingOrderId && r.closingOrderId === trade.closingOrderId));
+    if (match) { Object.assign(match, { ...trade, entryPrice: finiteOrNull(trade.entryPrice) ?? match.entryPrice, exitPrice: finiteOrNull(trade.exitPrice), submittedQty: finiteOrNull(trade.submittedQty) ?? match.submittedQty, actualQty: finiteOrNull(trade.actualQty) ?? match.actualQty, sizeNotional: finiteOrNull(trade.sizeNotional) ?? match.sizeNotional, marginUsed: finiteOrNull(trade.marginUsed) ?? match.marginUsed, realizedPnl: finiteOrNull(trade.realizedPnl), status: 'CLOSED', closedAt: trade.closedAt ?? Date.now() }); return { ok: true, id: String(match.id) }; }
+    const row = { id: this.nextId++, ...trade, entryPrice: finiteOrNull(trade.entryPrice), exitPrice: finiteOrNull(trade.exitPrice), submittedQty: finiteOrNull(trade.submittedQty), actualQty: finiteOrNull(trade.actualQty), sizeNotional: finiteOrNull(trade.sizeNotional), marginUsed: finiteOrNull(trade.marginUsed), leverage: finiteOrNull(trade.leverage), realizedPnl: finiteOrNull(trade.realizedPnl), openedAt: trade.openedAt ?? null, closedAt: trade.closedAt ?? Date.now() };
+    this.trades.unshift(row); return { ok: true, id: String(row.id) };
+  }
+  async updateOpenFill(openingOrderId: string, actualQty: number, avgEntryPrice: number, actualNotional: number) { const row = this.trades.find(r => r.openingOrderId === openingOrderId && r.status === 'OPEN'); if (!row) return false; row.actualQty = actualQty; row.entryPrice = avgEntryPrice; row.sizeNotional = actualNotional; row.marginUsed = row.leverage && row.leverage > 0 ? actualNotional / row.leverage : null; return true; }
+  async getTrades() { return this.trades.map(normalizeStoredTrade); }
+  async getClosedTrades() { return (await this.getTrades()).filter(r => r.status === 'CLOSED').sort((a,b) => (b.closedAt || 0) - (a.closedAt || 0)); }
+  async getSettings(key: string) { return this.settings.get(key) ?? null; }
+  async saveSettings(key: string, value: any) { this.settings.set(key, value); }
+}
 export const memoryStore = new InMemoryStore();
 
 export async function initDatabase() {
-  const connectionString = process.env.DATABASE_URL;
-  if (!connectionString) {
-    await memoryStore.init();
-    return false;
-  }
-
+  const connectionString = process.env.DATABASE_URL; persistentDbConfigured = Boolean(connectionString);
+  if (!connectionString) { await memoryStore.init(); return false; }
   try {
-    pool = new Pool({ connectionString });
-    // Test connection
-    const client = await pool.connect();
-    
-    // Create tables if not exist
+    pool = new Pool({ connectionString }); const client = await pool.connect();
     await client.query(`
       CREATE TABLE IF NOT EXISTS trades (
-        id SERIAL PRIMARY KEY,
-        symbol VARCHAR(20) NOT NULL,
-        side VARCHAR(10) NOT NULL,
-        entry_price NUMERIC(16, 6) NOT NULL,
-        exit_price NUMERIC(16, 6),
-        size_notional NUMERIC(16, 2) DEFAULT 1000.00,
-        margin_used NUMERIC(16, 2) DEFAULT 100.00,
-        leverage INT DEFAULT 10,
-        status VARCHAR(20) NOT NULL DEFAULT 'OPEN',
-        exit_reason VARCHAR(50),
-        realized_pnl NUMERIC(16, 4),
-        opened_at TIMESTAMPTZ DEFAULT NOW(),
-        closed_at TIMESTAMPTZ,
-        entry_diagnostics JSONB,
-        exit_audit JSONB,
-        source VARCHAR(10) NOT NULL DEFAULT 'unknown',
-        opening_order_id VARCHAR(100),
-        opening_order_link_id VARCHAR(100),
-        closing_order_id VARCHAR(100),
-        closing_order_link_id VARCHAR(100)
+        id SERIAL PRIMARY KEY, symbol VARCHAR(20) NOT NULL, side VARCHAR(10) NOT NULL,
+        entry_price NUMERIC(24,12), exit_price NUMERIC(24,12), submitted_qty NUMERIC(24,12), actual_qty NUMERIC(24,12),
+        size_notional NUMERIC(24,8), margin_used NUMERIC(24,8), leverage NUMERIC(12,4), status VARCHAR(20) NOT NULL DEFAULT 'OPEN',
+        exit_reason VARCHAR(100), realized_pnl NUMERIC(24,8), opened_at TIMESTAMPTZ, closed_at TIMESTAMPTZ,
+        entry_diagnostics JSONB, exit_audit JSONB, source VARCHAR(10) NOT NULL DEFAULT 'unknown',
+        opening_order_id VARCHAR(100), opening_order_link_id VARCHAR(100), closing_order_id VARCHAR(100), closing_order_link_id VARCHAR(100)
       );
-
-      ALTER TABLE trades ADD COLUMN IF NOT EXISTS entry_diagnostics JSONB;
-      ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_audit JSONB;
+      ALTER TABLE trades ALTER COLUMN entry_price DROP NOT NULL;
+      ALTER TABLE trades ALTER COLUMN size_notional DROP DEFAULT;
+      ALTER TABLE trades ALTER COLUMN margin_used DROP DEFAULT;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS submitted_qty NUMERIC(24,12);
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS actual_qty NUMERIC(24,12);
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS entry_diagnostics JSONB; ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_audit JSONB;
       ALTER TABLE trades ADD COLUMN IF NOT EXISTS source VARCHAR(10) NOT NULL DEFAULT 'unknown';
-      ALTER TABLE trades ADD COLUMN IF NOT EXISTS opening_order_id VARCHAR(100);
-      ALTER TABLE trades ADD COLUMN IF NOT EXISTS opening_order_link_id VARCHAR(100);
-      ALTER TABLE trades ADD COLUMN IF NOT EXISTS closing_order_id VARCHAR(100);
-      ALTER TABLE trades ADD COLUMN IF NOT EXISTS closing_order_link_id VARCHAR(100);
-      UPDATE trades SET source = 'unknown' WHERE source IS NULL OR source NOT IN ('auto','manual','external','unknown');
-
-      CREATE TABLE IF NOT EXISTS bot_settings (
-        key VARCHAR(100) PRIMARY KEY,
-        value JSONB NOT NULL,
-        updated_at TIMESTAMPTZ DEFAULT NOW()
-      );
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS opening_order_id VARCHAR(100); ALTER TABLE trades ADD COLUMN IF NOT EXISTS opening_order_link_id VARCHAR(100);
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS closing_order_id VARCHAR(100); ALTER TABLE trades ADD COLUMN IF NOT EXISTS closing_order_link_id VARCHAR(100);
+      UPDATE trades SET source='unknown' WHERE source IS NULL OR source NOT IN ('auto','manual','external','unknown');
+      CREATE UNIQUE INDEX IF NOT EXISTS trades_opening_order_id_unique ON trades(opening_order_id) WHERE opening_order_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS trades_opening_order_link_id_unique ON trades(opening_order_link_id) WHERE opening_order_link_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS trades_closing_order_id_idx ON trades(closing_order_id);
+      CREATE TABLE IF NOT EXISTS bot_settings (key VARCHAR(100) PRIMARY KEY, value JSONB NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW());
       ALTER TABLE bot_settings ALTER COLUMN key TYPE VARCHAR(100);
-
-      CREATE TABLE IF NOT EXISTS account_snapshots (
-        id SERIAL PRIMARY KEY,
-        boundary_ts TIMESTAMPTZ NOT NULL,
-        reporting_date VARCHAR(10) NOT NULL,
-        timezone VARCHAR(50) NOT NULL,
-        wallet_balance NUMERIC(20, 8),
-        equity NUMERIC(20, 8),
-        available_balance NUMERIC(20, 8),
-        captured_at TIMESTAMPTZ NOT NULL,
-        source VARCHAR(50) NOT NULL,
-        reliable_boundary BOOLEAN NOT NULL DEFAULT FALSE,
-        UNIQUE(boundary_ts, timezone)
-      );
-
-      CREATE TABLE IF NOT EXISTS report_events (
-        event_key VARCHAR(150) PRIMARY KEY,
-        event_type VARCHAR(50) NOT NULL,
-        occurred_at TIMESTAMPTZ NOT NULL,
-        reporting_date VARCHAR(10),
-        payload JSONB,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      );
+      CREATE TABLE IF NOT EXISTS account_snapshots (id SERIAL PRIMARY KEY, boundary_ts TIMESTAMPTZ NOT NULL, reporting_date VARCHAR(10) NOT NULL, timezone VARCHAR(50) NOT NULL, wallet_balance NUMERIC(20,8), equity NUMERIC(20,8), available_balance NUMERIC(20,8), captured_at TIMESTAMPTZ NOT NULL, source VARCHAR(50) NOT NULL, reliable_boundary BOOLEAN NOT NULL DEFAULT FALSE, UNIQUE(boundary_ts, timezone));
+      CREATE TABLE IF NOT EXISTS report_events (event_key VARCHAR(150) PRIMARY KEY, event_type VARCHAR(50) NOT NULL, occurred_at TIMESTAMPTZ NOT NULL, reporting_date VARCHAR(10), payload JSONB, created_at TIMESTAMPTZ DEFAULT NOW());
       CREATE INDEX IF NOT EXISTS report_events_type_time_idx ON report_events(event_type, occurred_at);
     `);
-    
-    client.release();
-    isConnected = true;
-    console.log("✅ [Database] Connected to Neon PostgreSQL and schemas initialized successfully.");
-    return true;
+    client.release(); isConnected = true; console.log('✅ [Database] Connected to Neon PostgreSQL and schemas initialized successfully.'); return true;
   } catch (err: any) {
-    console.error("❌ [Database] Failed to connect or initialize PostgreSQL schema:", err.message);
-    console.warn("⚠️ [Database] Falling back to in-memory store due to database connection error.");
-    pool = null;
-    isConnected = false;
-    await memoryStore.init();
-    return false;
+    console.error('❌ [Database] PostgreSQL unavailable:', err.message); console.error('❌ [Database] Persistent DB configured; refusing ephemeral trade-write fallback.'); pool = null; isConnected = false; return false;
   }
 }
 
-export async function dbRecordTrade(trade: {
-  symbol: string;
-  side: string;
-  entryPrice: number;
-  exitPrice?: number;
-  sizeNotional?: number;
-  marginUsed?: number;
-  leverage?: number;
-  status: string;
-  exitReason?: string;
-  realizedPnl?: number;
-  closedAt?: number;
-  entryDiagnostics?: Record<string, any>;
-  exitAudit?: Record<string, any>;
-  source?: 'auto' | 'manual' | 'external' | 'unknown';
-  openingOrderId?: string | null;
-  openingOrderLinkId?: string | null;
-  closingOrderId?: string | null;
-  closingOrderLinkId?: string | null;
-}) {
-  if (!isConnected || !pool) {
-    await memoryStore.recordTrade(trade);
-    return;
-  }
-
+export async function dbRecordTrade(trade: PersistedTradeInput): Promise<{ ok: boolean; id?: string; error?: string }> {
+  if (!persistentDbConfigured) return memoryStore.recordTrade(trade);
+  if (!isConnected || !pool) return { ok: false, error: 'Persistent database unavailable' };
   try {
     if (trade.status === 'OPEN') {
-      // Check if open trade already exists for symbol
-      const check = await pool.query("SELECT id FROM trades WHERE symbol = $1 AND status = 'OPEN'", [trade.symbol]);
-      if (check.rows.length === 0) {
-        await pool.query(
-          `INSERT INTO trades (symbol, side, entry_price, size_notional, margin_used, leverage, status, entry_diagnostics, source, opening_order_id, opening_order_link_id)
-           VALUES ($1, $2, $3, $4, $5, $6, 'OPEN', $7, $8, $9, $10)`,
-          [
-            trade.symbol,
-            trade.side,
-            trade.entryPrice,
-            trade.sizeNotional ?? 1000.0,
-            trade.marginUsed ?? 100.0,
-            trade.leverage ?? 10,
-            trade.entryDiagnostics ? JSON.stringify(trade.entryDiagnostics) : null,
-            trade.source || 'unknown',
-            trade.openingOrderId || null,
-            trade.openingOrderLinkId || null
-          ]
-        );
-      }
-    } else {
-      // CLOSED
-      const closedTime = trade.closedAt ? new Date(trade.closedAt) : new Date();
-      // Update existing open or insert if missing
-      const updateRes = await pool.query(
-        `UPDATE trades 
-         SET exit_price = $1, status = 'CLOSED', exit_reason = $2, realized_pnl = $3, closed_at = $4, exit_audit = $5,
-             closing_order_id = COALESCE($6, closing_order_id), closing_order_link_id = COALESCE($7, closing_order_link_id),
-             source = CASE WHEN source = 'unknown' AND $8 IS NOT NULL THEN $8 ELSE source END
-         WHERE symbol = $9 AND status = 'OPEN'`,
-        [
-          trade.exitPrice ?? 0,
-          trade.exitReason || 'Other / Unknown',
-          trade.realizedPnl ?? 0,
-          closedTime,
-          trade.exitAudit ? JSON.stringify(trade.exitAudit) : null,
-          trade.closingOrderId || null,
-          trade.closingOrderLinkId || null,
-          trade.source || null,
-          trade.symbol
-        ]
-      );
-
-      if (updateRes.rowCount === 0) {
-        // Insert closed trade directly if no open record was found
-        await pool.query(
-          `INSERT INTO trades (symbol, side, entry_price, exit_price, size_notional, margin_used, leverage, status, exit_reason, realized_pnl, closed_at, exit_audit, source, closing_order_id, closing_order_link_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, 'CLOSED', $8, $9, $10, $11, $12, $13, $14)`,
-          [
-            trade.symbol,
-            trade.side,
-            trade.entryPrice,
-            trade.exitPrice ?? 0,
-            trade.sizeNotional ?? 1000.0,
-            trade.marginUsed ?? 100.0,
-            trade.leverage ?? 10,
-            trade.exitReason || 'Other / Unknown',
-            trade.realizedPnl ?? 0,
-            closedTime,
-            trade.exitAudit ? JSON.stringify(trade.exitAudit) : null,
-            trade.source || 'external',
-            trade.closingOrderId || null,
-            trade.closingOrderLinkId || null
-          ]
-        );
-      }
+      if (!trade.openingOrderId && !trade.openingOrderLinkId) return { ok: false, error: 'Open trade requires stable unique order identity' };
+      const openedAt = trade.openedAt ? new Date(trade.openedAt) : new Date();
+      const res = await pool.query(`INSERT INTO trades (symbol,side,entry_price,submitted_qty,actual_qty,size_notional,margin_used,leverage,status,opened_at,entry_diagnostics,source,opening_order_id,opening_order_link_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'OPEN',$9,$10,$11,$12,$13) ON CONFLICT DO NOTHING RETURNING id`, [trade.symbol,trade.side,finiteOrNull(trade.entryPrice),finiteOrNull(trade.submittedQty),finiteOrNull(trade.actualQty),finiteOrNull(trade.sizeNotional),finiteOrNull(trade.marginUsed),finiteOrNull(trade.leverage),openedAt,trade.entryDiagnostics?JSON.stringify(trade.entryDiagnostics):null,trade.source||'unknown',trade.openingOrderId||null,trade.openingOrderLinkId||null]);
+      if (res.rows[0]?.id) return { ok:true,id:String(res.rows[0].id) };
+      const existing = trade.openingOrderId ? await pool.query('SELECT id FROM trades WHERE opening_order_id=$1 LIMIT 1',[trade.openingOrderId]) : await pool.query('SELECT id FROM trades WHERE opening_order_link_id=$1 LIMIT 1',[trade.openingOrderLinkId]);
+      return existing.rows[0]?.id ? {ok:true,id:String(existing.rows[0].id)} : {ok:false,error:'Stable open identity could not be persisted'};
     }
-  } catch (err: any) {
-    console.error("❌ [Database] Error recording trade in PostgreSQL:", err.message);
-    await memoryStore.recordTrade(trade);
-  }
-}
-
-export async function dbGetClosedTrades() {
-  if (!isConnected || !pool) {
-    return await memoryStore.getClosedTrades();
-  }
-
-  try {
-    const res = await pool.query(
-      `SELECT id, symbol, side, entry_price, exit_price, size_notional, margin_used, leverage, status, exit_reason, realized_pnl, opened_at, closed_at, entry_diagnostics, exit_audit
-       FROM trades
-       WHERE status = 'CLOSED'
-       ORDER BY closed_at DESC`
-    );
-    return res.rows.map(row => ({
-      id: row.id.toString(),
-      symbol: row.symbol,
-      side: row.side,
-      entryPrice: parseFloat(row.entry_price),
-      exitPrice: row.exit_price ? parseFloat(row.exit_price) : undefined,
-      qty: (parseFloat(row.size_notional) / parseFloat(row.entry_price)).toFixed(3),
-      pnl: parseFloat(row.realized_pnl || '0'),
-      pnlPercent: row.entry_price && row.exit_price ? ((parseFloat(row.exit_price) - parseFloat(row.entry_price)) / parseFloat(row.entry_price)) * 100 * (row.side === 'Sell' ? -1 : 1) : 0,
-      reason: row.exit_reason || 'Unknown / Other',
-      entryDiagnostics: row.entry_diagnostics || undefined,
-      exitAudit: row.exit_audit || undefined,
-      time: row.closed_at ? new Date(row.closed_at).getTime() : Date.now()
-    }));
-  } catch (err: any) {
-    console.error("❌ [Database] Error fetching closed trades from PostgreSQL:", err.message);
-    return await memoryStore.getClosedTrades();
-  }
-}
-
-export async function dbGetSettings(key: string) {
-  if (!isConnected || !pool) {
-    return await memoryStore.getSettings(key);
-  }
-  try {
-    const res = await pool.query("SELECT value FROM bot_settings WHERE key = $1", [key]);
-    if (res.rows.length > 0) {
-      return res.rows[0].value;
+    const closedAt = trade.closedAt ? new Date(trade.closedAt) : new Date();
+    if (trade.openingOrderId) {
+      const updated = await pool.query(`UPDATE trades SET entry_price=COALESCE($1,entry_price),exit_price=$2,actual_qty=COALESCE($3,actual_qty),size_notional=COALESCE($4,size_notional),margin_used=COALESCE($5,margin_used),leverage=COALESCE($6,leverage),status='CLOSED',exit_reason=$7,realized_pnl=$8,closed_at=$9,closing_order_id=$10,closing_order_link_id=$11,exit_audit=$12,source=CASE WHEN source='unknown' THEN COALESCE($13,source) ELSE source END WHERE opening_order_id=$14 RETURNING id`, [finiteOrNull(trade.entryPrice),finiteOrNull(trade.exitPrice),finiteOrNull(trade.actualQty),finiteOrNull(trade.sizeNotional),finiteOrNull(trade.marginUsed),finiteOrNull(trade.leverage),trade.exitReason||null,finiteOrNull(trade.realizedPnl),closedAt,trade.closingOrderId||null,trade.closingOrderLinkId||null,trade.exitAudit?JSON.stringify(trade.exitAudit):null,trade.source||null,trade.openingOrderId]);
+      if (updated.rows[0]?.id) return {ok:true,id:String(updated.rows[0].id)};
     }
-    return null;
-  } catch (err: any) {
-    console.error("❌ [Database] Error fetching settings:", err.message);
-    return await memoryStore.getSettings(key);
-  }
+    const inserted = await pool.query(`INSERT INTO trades (symbol,side,entry_price,exit_price,submitted_qty,actual_qty,size_notional,margin_used,leverage,status,exit_reason,realized_pnl,opened_at,closed_at,entry_diagnostics,exit_audit,source,opening_order_id,opening_order_link_id,closing_order_id,closing_order_link_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'CLOSED',$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) ON CONFLICT DO NOTHING RETURNING id`, [trade.symbol,trade.side,finiteOrNull(trade.entryPrice),finiteOrNull(trade.exitPrice),finiteOrNull(trade.submittedQty),finiteOrNull(trade.actualQty),finiteOrNull(trade.sizeNotional),finiteOrNull(trade.marginUsed),finiteOrNull(trade.leverage),trade.exitReason||null,finiteOrNull(trade.realizedPnl),trade.openedAt?new Date(trade.openedAt):null,closedAt,trade.entryDiagnostics?JSON.stringify(trade.entryDiagnostics):null,trade.exitAudit?JSON.stringify(trade.exitAudit):null,trade.source||'external',trade.openingOrderId||null,trade.openingOrderLinkId||null,trade.closingOrderId||null,trade.closingOrderLinkId||null]);
+    return inserted.rows[0]?.id ? {ok:true,id:String(inserted.rows[0].id)} : {ok:false,error:'Closed metadata row already exists or could not be inserted'};
+  } catch (err:any) { console.error('❌ [Database] Trade metadata persistence failed:',err.message); return {ok:false,error:err.message}; }
 }
 
-export async function dbSaveSettings(key: string, value: any) {
-  if (!isConnected || !pool) {
-    await memoryStore.saveSettings(key, value);
-    return;
-  }
-  try {
-    await pool.query(
-      `INSERT INTO bot_settings (key, value, updated_at) VALUES ($1, $2, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
-      [key, JSON.stringify(value)]
-    );
-  } catch (err: any) {
-    console.error("❌ [Database] Error saving settings:", err.message);
-    await memoryStore.saveSettings(key, value);
-  }
+export async function dbUpdateOpenTradeFill(openingOrderId:string, actualQty:number, avgEntryPrice:number, actualNotional:number):Promise<boolean>{
+  if (!(openingOrderId && Number.isFinite(actualQty) && actualQty>0 && Number.isFinite(avgEntryPrice) && avgEntryPrice>0 && Number.isFinite(actualNotional) && actualNotional>0)) return false;
+  if (!persistentDbConfigured) return memoryStore.updateOpenFill(openingOrderId,actualQty,avgEntryPrice,actualNotional);
+  if (!isConnected || !pool) return false;
+  try { const res=await pool.query(`UPDATE trades SET actual_qty=$1,entry_price=$2,size_notional=$3,margin_used=CASE WHEN leverage>0 THEN $3/leverage ELSE NULL END WHERE opening_order_id=$4 AND status='OPEN'`,[actualQty,avgEntryPrice,actualNotional,openingOrderId]); return (res.rowCount||0)>0; } catch(err:any){ console.error('❌ [Database] Fill update failed:',err.message); return false; }
 }
 
+export async function dbGetClosedTrades(){ if(!persistentDbConfigured) return memoryStore.getClosedTrades(); if(!isConnected||!pool) return []; try { const res=await pool.query(`SELECT * FROM trades WHERE status='CLOSED' ORDER BY closed_at DESC`); return res.rows.map(normalizeStoredTrade); } catch(err:any){ console.error('❌ [Database] Closed metadata query failed:',err.message); return []; } }
+export async function dbGetTradeMetadata(startMs:number,endMs:number):Promise<{ok:boolean;rows:any[];error?:string}>{ if(!persistentDbConfigured){const rows=(await memoryStore.getTrades()).filter(r=>{const t=r.closedAt??r.openedAt??0;return t>=startMs&&t<endMs});return{ok:true,rows};} if(!isConnected||!pool)return{ok:false,rows:[],error:'Persistent database unavailable'}; try{const res=await pool.query(`SELECT * FROM trades WHERE (opened_at >= $1 AND opened_at < $2) OR (closed_at >= $1 AND closed_at < $2) ORDER BY COALESCE(closed_at,opened_at) DESC`,[new Date(startMs),new Date(endMs)]);return{ok:true,rows:res.rows.map(normalizeStoredTrade)}}catch(err:any){return{ok:false,rows:[],error:err.message}} }
+export async function dbGetSettings(key:string){ if(!persistentDbConfigured)return memoryStore.getSettings(key); if(!isConnected||!pool)return null; try{const res=await pool.query('SELECT value FROM bot_settings WHERE key=$1',[key]);return res.rows[0]?.value??null}catch(err:any){console.error('❌ [Database] Error fetching settings:',err.message);return null} }
+export async function dbSaveSettings(key:string,value:any){ if(!persistentDbConfigured)return memoryStore.saveSettings(key,value); if(!isConnected||!pool)return; try{await pool.query(`INSERT INTO bot_settings (key,value,updated_at) VALUES ($1,$2,NOW()) ON CONFLICT (key) DO UPDATE SET value=$2,updated_at=NOW()`,[key,JSON.stringify(value)])}catch(err:any){console.error('❌ [Database] Error saving settings:',err.message)} }
 
 export async function dbGetReportTrades(startMs: number, endMs: number): Promise<{ ok: boolean; rows: any[]; error?: string }> {
   if (!isConnected || !pool) {

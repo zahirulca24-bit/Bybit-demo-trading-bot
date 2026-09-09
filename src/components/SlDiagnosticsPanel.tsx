@@ -30,7 +30,7 @@ export function SlDiagnosticsPanel({
   const slTrades = closedTrades.filter(
     (t) => t.exitTrigger?.toLowerCase().includes("sl") || 
            t.exitTrigger?.toLowerCase().includes("stop loss") || 
-           (t.pnl < 0 && (t.pnlPercent <= -0.8 || t.exitTrigger?.includes("Hard SL")))
+           false
   );
 
   const formatDuration = (seconds: number) => {
@@ -78,7 +78,7 @@ export function SlDiagnosticsPanel({
               <AlertTriangle className="w-4 h-4 text-amber-400" />
             </div>
             <div className="text-base font-bold text-amber-300 font-mono flex items-center gap-1.5">
-              <span>{slAudit.primarySlCause || "5m Volatility Spike / Spread Wick"}</span>
+              <span>{slAudit.primarySlCause || "Unavailable"}</span>
             </div>
           </div>
           <p className="text-[11px] text-neutral-500 mt-2">
@@ -95,10 +95,10 @@ export function SlDiagnosticsPanel({
             </div>
             <div className="flex items-baseline gap-2">
               <span className="text-xl font-bold text-white font-mono">
-                {slAudit.worstPerformingSymbol || "SOLUSDT"}
+                {slAudit.worstPerformingSymbol || "Unavailable"}
               </span>
               <span className="text-xs text-rose-400 font-mono">
-                ({slAudit.slCountForWorst || 0} SL Hits)
+                ({slAudit.slCountForWorst ?? "—"} SL Hits)
               </span>
             </div>
           </div>
@@ -115,7 +115,7 @@ export function SlDiagnosticsPanel({
               <Clock className="w-4 h-4 text-blue-400" />
             </div>
             <div className="text-xl font-bold text-white font-mono">
-              {formatDuration(slAudit.averageTimeToSlSeconds || 142)}
+              {formatDuration(slAudit.averageTimeToSlSeconds)}
             </div>
           </div>
           <p className="text-[11px] text-neutral-500 mt-2">
@@ -134,8 +134,7 @@ export function SlDiagnosticsPanel({
             Automated Strategy Feedback & Adaptation Recommendation
           </h4>
           <p className="text-xs text-neutral-300 leading-relaxed">
-            {slAudit.strategyFeedbackNote || 
-              "Analysis indicates SL triggers primarily occur within 3 minutes of entry during high 5m ATR periods. Consider adjusting Gate 2 Orderbook Spread filter from 0.15% to 0.10% or widening Hard SL to -1.25% to absorb normal scalp noise without breaking the net circuit breaker."}
+            {slAudit.strategyFeedbackNote || "Unavailable — insufficient classified SL metadata."}
           </p>
         </div>
       </div>
@@ -158,12 +157,12 @@ export function SlDiagnosticsPanel({
                     {trade.side}
                   </span>
                   <span className="text-neutral-500 text-[11px]">
-                    ${trade.entryPrice.toFixed(2)} → ${trade.exitPrice.toFixed(2)}
+                    {trade.entryPrice === null ? "—" : `$${trade.entryPrice.toFixed(2)}`} → {trade.exitPrice === null ? "—" : `$${trade.exitPrice.toFixed(2)}`}
                   </span>
                 </div>
                 <div className="text-right">
                   <span className="text-rose-400 font-bold">
-                    -${Math.abs(trade.pnl).toFixed(2)} ({trade.pnlPercent.toFixed(2)}%)
+                    {trade.pnl === null ? "—" : `$${Math.abs(trade.pnl).toFixed(2)}`} ({trade.returnOnNotionalPercent == null ? "—" : `${trade.returnOnNotionalPercent.toFixed(2)}%`})
                   </span>
                   <div className="text-[10px] text-neutral-500">
                     {trade.slDiagnosticReason || "Wick Reversal"}

@@ -10,10 +10,11 @@ import { EMA } from "technicalindicators";
 import { TradingEngine } from "./src/engine/TradingEngine";
 import { LegacyInformationalScanner5m } from "./src/engine/MarketScanner5m";
 import { SixGateFilteringPipeline } from "./src/engine/SixGateFilteringPipeline";
-import { initDatabase, dbGetClosedTrades } from "./src/db";
+import { initDatabase, dbGetTradeMetadata } from "./src/db";
 import { getUtcTradingDayWindow, normalizeTimestampMs } from "./src/utils/utcTradingDay";
 import { classifyClosedTradeExit } from "./src/utils/exitClassification";
 import { TelegramReportService } from "./src/engine/TelegramReportService";
+import { fetchClosedPnlRange, fetchExecutionRange, mergeStableLocalMetadata, summarizeNormalizedTrades } from "./src/utils/exchangeTradeHistory";
 
 dotenv.config();
 
@@ -116,16 +117,36 @@ async function startServer() {
 
   app.get("/api/history", async (req, res) => {
     try {
-      const closedTrades = await dbGetClosedTrades();
-      const totalTrades = closedTrades.length;
-      const winningTrades = closedTrades.filter(t => t.pnl > 0).length;
-      const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
-      const totalPnl = closedTrades.reduce((sum, t) => sum + t.pnl, 0);
-      res.json({
-        success: true,
-        history: closedTrades,
-        metrics: { totalTrades, winRate: winRate.toFixed(1) + "%", totalPnl: totalPnl.toFixed(2) }
-      });
+      const endTime = Number(req.query.endTime) || Date.now() + 1;
+      const requestedStart = Number(req.query.startTime);
+      const startTime = Number.isFinite(requestedStart) && requestedStart > 0 ? requestedStart : endTime - 7 * 24 * 60 * 60 * 1000;
+      const symbol = typeof req.query.symbol === "string" && req.query.symbol ? req.query.symbol.toUpperCase() : undefined;
+      const exchange = await fetchClosedPnlRange(bybit, { startTime, endTime, symbol });
+      if (!exchange.ok) return res.status(502).json({ success: false, error: exchange.error || "Bybit Closed PnL unavailable" });
+      const metadata = await dbGetTradeMetadata(startTime, endTime);
+      const merged = mergeStableLocalMetadata(exchange.trades, metadata.ok ? metadata.rows : []);
+      const summary = summarizeNormalizedTrades(merged);
+      const history = merged.map((trade) => ({
+        id: trade.id,
+        symbol: trade.symbol,
+        side: trade.side,
+        qty: trade.filledQty,
+        filledQty: trade.filledQty,
+        entryPrice: trade.avgEntryPrice,
+        exitPrice: trade.avgExitPrice,
+        pnl: trade.realizedPnlUsdt,
+        realizedPnlUsdt: trade.realizedPnlUsdt,
+        priceMovePercent: trade.priceMovePercent,
+        returnOnNotionalPercent: trade.returnOnNotionalPercent,
+        roePercent: trade.roePercent,
+        pnlPercent: trade.returnOnNotionalPercent,
+        reason: trade.metadata?.exitReason || "Other / Unknown",
+        time: trade.closedAt,
+        orderId: trade.orderId,
+        orderLinkId: trade.orderLinkId,
+        outcome: trade.outcome,
+      }));
+      res.json({ success: true, source: "Bybit Closed PnL", history, metrics: summary, metadataCoverage: metadata.ok ? "available" : "unavailable" });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
@@ -279,76 +300,21 @@ async function startServer() {
 
   app.get("/api/trading-summary", async (req, res) => {
     try {
-      const symbol = req.query.symbol as string | undefined;
-      const limit = Math.min(100, parseInt((req.query.limit as string) || "50", 10));
-      const pnlParams: any = { category: "linear", limit };
-      if (symbol) pnlParams.symbol = symbol.toUpperCase();
-      const pnlResponse = await bybit.getClosedPnL(pnlParams);
-      const rawClosedList = pnlResponse.result?.list || [];
-      const execParams: any = { category: "linear", limit };
-      if (symbol) execParams.symbol = symbol.toUpperCase();
-      const execResponse = await bybit.getExecutionList(execParams);
-      const rawExecList = execResponse.result?.list || [];
-
-      let totalRealizedPnl = 0;
-      let winningTrades = 0;
-      let losingTrades = 0;
-      let breakEvenTrades = 0;
-      const closedTrades = rawClosedList.map((item: any) => {
-        const closedPnlNum = parseFloat(item.closedPnl || "0");
-        totalRealizedPnl += closedPnlNum;
-        if (closedPnlNum > 0) winningTrades++;
-        else if (closedPnlNum < 0) losingTrades++;
-        else breakEvenTrades++;
-        return {
-          symbol: item.symbol,
-          orderId: item.orderId,
-          side: item.side,
-          qty: item.qty,
-          entryPrice: parseFloat(item.avgEntryPrice || "0"),
-          exitPrice: parseFloat(item.avgExitPrice || "0"),
-          closedPnl: closedPnlNum,
-          closedPnlPercent: item.avgEntryPrice && parseFloat(item.avgEntryPrice) > 0
-            ? ((parseFloat(item.avgExitPrice || "0") - parseFloat(item.avgEntryPrice)) / parseFloat(item.avgEntryPrice)) * 100 * (item.side === "Buy" ? -1 : 1)
-            : 0,
-          execTime: normalizeTimestampMs(item.updatedTime || item.execTime || item.createdTime),
-          orderType: item.orderType,
-        };
-      });
-      const totalClosedTrades = closedTrades.length;
-      const winRatePercent = totalClosedTrades > 0 ? parseFloat(((winningTrades / totalClosedTrades) * 100).toFixed(2)) : 0;
-      const averagePnlPerTrade = totalClosedTrades > 0 ? parseFloat((totalRealizedPnl / totalClosedTrades).toFixed(4)) : 0;
-      const executionLogs = rawExecList.map((exec: any) => ({
-        execId: exec.execId,
-        orderId: exec.orderId,
-        symbol: exec.symbol,
-        side: exec.side,
-        price: parseFloat(exec.execPrice || "0"),
-        qty: parseFloat(exec.execQty || "0"),
-        fee: parseFloat(exec.execFee || "0"),
-        feeRate: parseFloat(exec.feeRate || "0"),
-        execTime: normalizeTimestampMs(exec.execTime),
-        execType: exec.execType,
-        isMaker: exec.isMaker,
-        closedSize: exec.closedSize,
-        stopOrderType: exec.stopOrderType,
-      }));
+      const endTime = Number(req.query.endTime) || Date.now() + 1;
+      const requestedStart = Number(req.query.startTime);
+      const startTime = Number.isFinite(requestedStart) && requestedStart > 0 ? requestedStart : endTime - 7 * 24 * 60 * 60 * 1000;
+      const symbol = typeof req.query.symbol === "string" && req.query.symbol ? req.query.symbol.toUpperCase() : undefined;
+      const exchange = await fetchClosedPnlRange(bybit, { startTime, endTime, symbol });
+      if (!exchange.ok) return res.status(502).json({ success: false, error: exchange.error });
+      const metadata = await dbGetTradeMetadata(startTime, endTime);
+      const trades = mergeStableLocalMetadata(exchange.trades, metadata.ok ? metadata.rows : []);
       res.json({
         success: true,
         environment: "Bybit UTA Demo Trading (V5)",
+        source: "Bybit Closed PnL",
         timestamp: Date.now(),
-        metrics: {
-          totalClosedTrades,
-          winningTrades,
-          losingTrades,
-          breakEvenTrades,
-          winRatePercent,
-          totalRealizedPnl: parseFloat(totalRealizedPnl.toFixed(4)),
-          averagePnlPerTrade,
-          currency: "USDT",
-        },
-        closedTrades,
-        executionLogs,
+        metrics: summarizeNormalizedTrades(trades),
+        closedTrades: trades,
       });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message || "Failed to fetch trading summary from Bybit Demo API" });
@@ -359,156 +325,100 @@ async function startServer() {
     try {
       const nowMs = Date.now();
       const { startMs: dayStartMs, endMs: dayEndMs } = getUtcTradingDayWindow(nowMs);
-
-      const [posRes, pnlResponse, execResponse, orderHistoryResponse] = await Promise.all([
+      const [posRes, closedResult, executionResult, orderHistoryResponse] = await Promise.all([
         bybit.getPositionInfo({ category: "linear", settleCoin: "USDT" }),
-        bybit.getClosedPnL({ category: "linear", startTime: dayStartMs, endTime: dayEndMs, limit: 100 }),
-        bybit.getExecutionList({ category: "linear", startTime: dayStartMs, endTime: dayEndMs, limit: 100 }),
-        bybit.getHistoricOrders({ category: "linear", startTime: dayStartMs, endTime: dayEndMs, limit: 100 }).catch(() => null),
+        fetchClosedPnlRange(bybit, { startTime: dayStartMs, endTime: dayEndMs }),
+        fetchExecutionRange(bybit, { startTime: dayStartMs, endTime: dayEndMs }),
+        bybit.getHistoricOrders({ category: "linear", startTime: dayStartMs, endTime: dayEndMs - 1, limit: 100 }).catch(() => null),
       ]);
+      if (!closedResult.ok) return res.status(502).json({ success: false, error: closedResult.error || "Bybit Closed PnL unavailable" });
+      if (!executionResult.ok) return res.status(502).json({ success: false, error: executionResult.error || "Bybit executions unavailable" });
 
-      const openPositions = (posRes.result?.list || []).filter((p: any) => parseFloat(p.size || "0") > 0);
-      const activePositionsCount = openPositions.length;
-      const maxSlots = engine.settings.maxPositions || 3;
-      const rawClosedList = pnlResponse.result?.list || [];
-      const rawExecutions = execResponse.result?.list || [];
-      const rawOrderHistory = orderHistoryResponse?.retCode === 0 ? (orderHistoryResponse.result?.list || []) : [];
+      const openPositions = (posRes.result?.list || []).filter((p: any) => Number(p.size) > 0);
+      const metadata = await dbGetTradeMetadata(dayStartMs, dayEndMs);
+      const mergedTrades = mergeStableLocalMetadata(closedResult.trades, metadata.ok ? metadata.rows : []);
+      const rawOrders = orderHistoryResponse?.retCode === 0 ? (orderHistoryResponse.result?.list || []) : [];
       const engineHistory = engine.getHistory() || [];
-
-      const closedTodayRaw = rawClosedList.filter((item: any) => {
-        const closeTime = normalizeTimestampMs(item.updatedTime || item.execTime || item.createdTime);
-        return closeTime >= dayStartMs && closeTime <= dayEndMs;
-      });
-      const executionsToday = rawExecutions.filter((exec: any) => {
-        const execTime = normalizeTimestampMs(exec.execTime);
-        return execTime >= dayStartMs && execTime <= dayEndMs && String(exec.execType || "Trade") === "Trade";
-      });
-      const ordersToday = rawOrderHistory.filter((order: any) => {
-        const orderTime = normalizeTimestampMs(order.updatedTime || order.createdTime);
-        return orderTime >= dayStartMs && orderTime <= dayEndMs;
-      });
-
-      const dailyCounters = { tp: 0, sl: 0, trailing: 0, manual: 0, other: 0, wins: 0, losses: 0 };
+      const rawByOrderId = new Map(closedResult.rows.map((row: any) => [String(row.orderId || ""), row]));
+      const counters = { tp: 0, sl: 0, trailing: 0, manual: 0, other: 0 };
       const slCountsBySymbol: Record<string, number> = {};
 
-      const todayTrades = closedTodayRaw.map((item: any) => {
-        const pnl = Number(item.closedPnl || 0);
-        const entryPrice = Number(item.avgEntryPrice || 0);
-        const exitPrice = Number(item.avgExitPrice || 0);
-        const closeTime = normalizeTimestampMs(item.updatedTime || item.execTime || item.createdTime);
-        const pnlPercent = entryPrice > 0
-          ? ((exitPrice - entryPrice) / entryPrice) * 100 * (item.side === "Buy" ? -1 : 1)
-          : 0;
-
+      const closedTrades = mergedTrades.map((trade) => {
+        const raw = trade.orderId ? rawByOrderId.get(trade.orderId) : null;
         const classified = classifyClosedTradeExit({
-          closedTrade: item,
-          executions: executionsToday,
-          orders: ordersToday,
+          closedTrade: raw || {},
+          executions: executionResult.rows,
+          orders: rawOrders,
           localHistory: engineHistory,
         });
-
-        if (classified.category === "TP") dailyCounters.tp++;
-        else if (classified.category === "SL") {
-          dailyCounters.sl++;
-          slCountsBySymbol[item.symbol] = (slCountsBySymbol[item.symbol] || 0) + 1;
-        } else if (classified.category === "TRAILING") dailyCounters.trailing++;
-        else if (classified.category === "MANUAL") dailyCounters.manual++;
-        else dailyCounters.other++;
-
-        if (pnl > 0) dailyCounters.wins++;
-        else if (pnl < 0) dailyCounters.losses++;
-
+        if (classified.category === "TP") counters.tp++;
+        else if (classified.category === "SL") { counters.sl++; slCountsBySymbol[trade.symbol] = (slCountsBySymbol[trade.symbol] || 0) + 1; }
+        else if (classified.category === "TRAILING") counters.trailing++;
+        else if (classified.category === "MANUAL") counters.manual++;
+        else counters.other++;
         return {
-          id: String(item.orderId || `close-${item.symbol}-${closeTime}`),
-          symbol: item.symbol,
-          side: item.side === "Buy" ? "SHORT" : "LONG",
-          entryPrice,
-          exitPrice,
-          qty: String(item.qty || "0"),
-          pnl,
-          pnlPercent,
+          id: trade.id,
+          symbol: trade.symbol,
+          side: trade.side,
+          entryPrice: trade.avgEntryPrice,
+          exitPrice: trade.avgExitPrice,
+          qty: trade.filledQty,
+          pnl: trade.realizedPnlUsdt,
+          pnlPercent: trade.returnOnNotionalPercent,
+          priceMovePercent: trade.priceMovePercent,
+          returnOnNotionalPercent: trade.returnOnNotionalPercent,
+          roePercent: trade.roePercent,
+          outcome: trade.outcome,
           exitTrigger: classified.label,
           classifiedBy: classified.classifiedBy,
           matchedOrderId: classified.matchedOrderId,
           matchedOrderLinkId: classified.matchedOrderLinkId,
           rawStopOrderType: classified.rawStopOrderType,
           rawCreateType: classified.rawCreateType,
-          time: closeTime,
+          time: trade.closedAt,
         };
       });
 
-      // Opening executions have no closedSize (or zero closedSize). Count unique opening orders,
-      // not fills, so partial fills do not inflate Today's Total Opened.
-      const openingExecutions = executionsToday.filter((exec: any) => Number(exec.closedSize || 0) <= 0);
-      const openedTradeKeys = new Set<string>();
-      for (const exec of openingExecutions) {
-        const execTime = normalizeTimestampMs(exec.execTime);
-        const key = String(exec.orderId || exec.execId || `${exec.symbol}:${exec.side}:${execTime}`);
-        openedTradeKeys.add(key);
-      }
-
-      // Position openTime is a fallback for a still-open position if its opening execution is not
-      // present in the current execution page. Overnight positions are intentionally excluded.
-      for (const pos of openPositions) {
-        const openTime = normalizeTimestampMs(pos.openTime || pos.createdTime || pos.updatedTime);
-        if (openTime < dayStartMs || openTime > dayEndMs) continue;
-        const hasMatchingExecution = openingExecutions.some((exec: any) =>
-          exec.symbol === pos.symbol && exec.side === pos.side && Math.abs(normalizeTimestampMs(exec.execTime) - openTime) <= 60_000
-        );
-        if (!hasMatchingExecution) openedTradeKeys.add(`position:${pos.symbol}:${pos.side}:${openTime}`);
-      }
-
-      const realizedPnlToday = todayTrades.reduce((sum: number, t: any) => sum + Number(t.pnl || 0), 0);
-      const unrealizedPnlToday = openPositions.reduce((sum: number, p: any) => sum + Number(p.unrealisedPnl || 0), 0);
-      const netDailyPnl = realizedPnlToday + unrealizedPnlToday;
-      const exitBreakdownTotal = dailyCounters.tp + dailyCounters.sl + dailyCounters.trailing + dailyCounters.manual + dailyCounters.other;
-      if (exitBreakdownTotal !== todayTrades.length) {
-        throw new Error(`Daily exit breakdown mismatch: ${exitBreakdownTotal} categorized vs ${todayTrades.length} closed`);
-      }
-
+      const openingExecutions = executionResult.rows.filter((exec: any) => String(exec.execType || "Trade") === "Trade" && Number(exec.execQty || 0) > 0 && Number(exec.closedSize || 0) <= 0);
+      const openedTradeKeys = new Set(openingExecutions.map((exec: any) => String(exec.orderId || exec.orderLinkId || exec.execId || `${exec.symbol}:${exec.side}:${normalizeTimestampMs(exec.execTime)}`)));
+      const summary = summarizeNormalizedTrades(mergedTrades);
+      const unrealizedValues = openPositions.map((p: any) => Number(p.unrealisedPnl)).filter((n: number) => Number.isFinite(n));
+      const unrealizedPnlToday = unrealizedValues.length === openPositions.length ? unrealizedValues.reduce((sum: number, n: number) => sum + n, 0) : null;
+      const netDailyPnl = summary.realizedPnlUsdt !== null && unrealizedPnlToday !== null ? summary.realizedPnlUsdt + unrealizedPnlToday : null;
       let worstPerformingSymbol = "None";
       let slCountForWorst = 0;
-      for (const [symbol, count] of Object.entries(slCountsBySymbol)) {
-        if (count > slCountForWorst) {
-          worstPerformingSymbol = symbol;
-          slCountForWorst = count;
-        }
-      }
+      for (const [symbol, count] of Object.entries(slCountsBySymbol)) if (count > slCountForWorst) { worstPerformingSymbol = symbol; slCountForWorst = count; }
 
-      res.json({
-        success: true,
-        analytics: {
-          tradingDay: "UTC",
-          tradingDayStartUtc: dayStartMs,
-          windowEndUtc: dayEndMs,
-          todayOpenedCount: openedTradeKeys.size,
-          todayClosedCount: todayTrades.length,
-          winningTradesCount: dailyCounters.wins,
-          losingTradesCount: dailyCounters.losses,
-          activePositionsCount,
-          maxSlots,
-          tpHitCount: dailyCounters.tp,
-          trailingStopCount: dailyCounters.trailing,
-          slHitCount: dailyCounters.sl,
-          manualCloseCount: dailyCounters.manual,
-          otherExitCount: dailyCounters.other,
-          breakEvenCount: 0,
-          realizedPnlToday,
-          unrealizedPnlToday,
-          netDailyPnl,
-          slAudit: {
-            primarySlCause: dailyCounters.sl > 0 ? "Exact root cause unavailable from current Bybit/local metadata" : "No Stop Loss exits today",
-            worstPerformingSymbol,
-            slCountForWorst,
-            averageTimeToSlSeconds: 0,
-            strategyFeedbackNote: "Daily SL analytics use only confirmed UTC-day exits. Unknown reasons remain Unknown / Other; no random or PnL-sign classification is fabricated.",
-            totalLossUsdt: todayTrades
-              .filter((t: any) => t.exitTrigger === "Stop Loss")
-              .reduce((sum: number, t: any) => sum + Math.abs(Number(t.pnl || 0)), 0),
-          },
-          closedTrades: todayTrades,
+      res.json({ success: true, analytics: {
+        tradingDay: "UTC",
+        tradingDayStartUtc: dayStartMs,
+        windowEndUtc: dayEndMs,
+        todayOpenedCount: openedTradeKeys.size,
+        todayClosedCount: closedTrades.length,
+        winningTradesCount: summary.wins,
+        losingTradesCount: summary.losses,
+        zeroOrUnknownCount: summary.zeroOrUnknown,
+        activePositionsCount: openPositions.length,
+        maxSlots: engine.settings.maxPositions || 3,
+        tpHitCount: counters.tp,
+        trailingStopCount: counters.trailing,
+        slHitCount: counters.sl,
+        manualCloseCount: counters.manual,
+        otherExitCount: counters.other,
+        breakEvenCount: summary.zero,
+        realizedPnlToday: summary.realizedPnlUsdt,
+        unrealizedPnlToday,
+        netDailyPnl,
+        slAudit: {
+          primarySlCause: counters.sl > 0 ? "Exact root cause unavailable from current Bybit/order metadata" : "No Stop Loss exits today",
+          worstPerformingSymbol,
+          slCountForWorst,
+          averageTimeToSlSeconds: 0,
+          strategyFeedbackNote: "Daily PnL and quantities come from paginated Bybit exchange records. Unknown values remain unavailable.",
+          totalLossUsdt: mergedTrades.filter((t) => t.outcome === "LOSS" && t.realizedPnlUsdt !== null).reduce((sum, t) => sum + Math.abs(t.realizedPnlUsdt as number), 0),
         },
-      });
+        closedTrades,
+      }});
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }

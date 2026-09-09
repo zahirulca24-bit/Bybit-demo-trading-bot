@@ -113,11 +113,11 @@ export function ActiveTradesPage({
     },
     { totalPositionValue: 0, totalMargin: 0, unrealized: 0 }
   );
-  const calculatedRoiValue = analytics && totalMargin > 0 ? (analytics.unrealizedPnlToday / totalMargin) * 100 : null;
+  const calculatedRoiValue = analytics && analytics.unrealizedPnlToday !== null && totalMargin > 0 ? (analytics.unrealizedPnlToday / totalMargin) * 100 : null;
 
-  const totalRealizedPnl = analytics ? Number(analytics.realizedPnlToday) : null;
-  const totalUnrealizedPnl = analytics ? Number(analytics.unrealizedPnlToday) : null;
-  const netDailyPnl = analytics ? Number(analytics.netDailyPnl) : null;
+  const totalRealizedPnl = analytics?.realizedPnlToday ?? null;
+  const totalUnrealizedPnl = analytics?.unrealizedPnlToday ?? null;
+  const netDailyPnl = analytics?.netDailyPnl ?? null;
   const isNetPositive = netDailyPnl !== null && netDailyPnl >= 0;
   const maxLossLimit = settings?.globalMaxLossUsdt ?? -50;
   const isApproachingLimit = netDailyPnl !== null && netDailyPnl <= maxLossLimit * 0.8;
@@ -236,7 +236,7 @@ export function ActiveTradesPage({
             <FileText className="w-4 h-4 text-blue-400" />
           </div>
           <p className="text-2xl font-bold text-white font-mono">{analytics?.todayClosedCount}</p>
-          <p className="text-[11px] text-neutral-500 mt-2">Wins {analytics?.winningTradesCount} / Losses {analytics?.losingTradesCount}</p>
+          <p className="text-[11px] text-neutral-500 mt-2">Wins {analytics?.winningTradesCount ?? "—"} / Losses {analytics?.losingTradesCount ?? "—"} / Zero-or-Unknown {analytics?.zeroOrUnknownCount ?? "—"}</p>
         </div>
 
         <div className="bg-neutral-900 border border-neutral-800 p-5 rounded-xl">
@@ -269,8 +269,8 @@ export function ActiveTradesPage({
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-5 gap-4">
-        <PnlCard label="Today's Realized PnL" value={totalRealizedPnl} />
-        <PnlCard label="Unrealized PnL" value={totalUnrealizedPnl} suffix={calculatedRoiValue === null ? undefined : `ROI ${calculatedRoiValue >= 0 ? "+" : ""}${calculatedRoiValue.toFixed(2)}%`} />
+        <PnlCard label="Realized PnL USDT Today" value={totalRealizedPnl} />
+        <PnlCard label="Unrealized PnL" value={totalUnrealizedPnl} suffix={calculatedRoiValue === null ? undefined : `ROE ${calculatedRoiValue >= 0 ? "+" : ""}${calculatedRoiValue.toFixed(2)}%`} />
         <div className={`p-4 rounded-xl border ${isApproachingLimit ? "bg-rose-950/40 border-rose-500" : "bg-neutral-900 border-neutral-800"}`}>
           <div className="flex items-center justify-between mb-1">
             <span className="text-xs text-neutral-400 font-medium">Net Daily PnL</span>
@@ -390,7 +390,7 @@ export function ActiveTradesPage({
   );
 }
 
-function StatBadge({ label, value, className }: { label: string; value: number | undefined; className: string }) {
+function StatBadge({ label, value, className }: { label: string; value: number | null | undefined; className: string }) {
   return (
     <div className="bg-neutral-950 border border-neutral-800 px-2 py-1 rounded-md flex items-center justify-between">
       <span className="text-[10px] text-neutral-400 font-semibold">{label}:</span>
