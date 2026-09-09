@@ -1,7 +1,5 @@
 import type { ScannedMarketItem } from "../types";
 
-export const STRICT_MAX_CONCURRENT_POSITIONS = 3;
-
 export type ScannerTimingState = "Bullish" | "Bearish" | "Neutral" | "Unavailable";
 
 export function finiteNumber(value: unknown): number | null {

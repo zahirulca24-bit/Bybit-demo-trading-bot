@@ -1,14 +1,21 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Activity, CheckCircle2, AlertCircle, Flame, RefreshCw, Send, ShieldAlert, ShieldCheck, Sliders, Terminal as TerminalIcon, Trash2, Wifi } from "lucide-react";
-import { Settings } from "../types";
+import { Activity, Flame, RefreshCw, Send, ShieldAlert, ShieldCheck, Sliders, Terminal as TerminalIcon, Trash2, Wifi } from "lucide-react";
+import { RuntimeRiskStatus, Settings } from "../types";
 
 interface SettingsPageProps {
   settings: Settings;
+  runtimeStatus: RuntimeRiskStatus;
   updateSetting: (key: string, value: number) => void;
   systemLogs?: string[];
 }
 
-export function SettingsPage({ settings, updateSetting, systemLogs = [] }: SettingsPageProps) {
+function formatDuration(ms: number): string {
+  if (ms % 3_600_000 === 0) return `${ms / 3_600_000}h`;
+  if (ms % 60_000 === 0) return `${ms / 60_000} minutes`;
+  return `${Math.round(ms / 1000)} seconds`;
+}
+
+export function SettingsPage({ settings, runtimeStatus, updateSetting, systemLogs = [] }: SettingsPageProps) {
   const [bybitTesting, setBybitTesting] = useState(false);
   const [bybitStatus, setBybitStatus] = useState<{ tested: boolean; success: boolean; latencyMs?: number; serverTime?: string; environment?: string; error?: string } | null>(null);
   const [telegramTesting, setTelegramTesting] = useState(false);
@@ -18,13 +25,13 @@ export function SettingsPage({ settings, updateSetting, systemLogs = [] }: Setti
 
   const addDiagLog = (msg: string) => {
     const timestamp = new Date().toLocaleTimeString();
-    setLocalLogs(prev => [...prev.slice(-100), `[${timestamp}] ${msg}`]);
+    setLocalLogs((prev) => [...prev.slice(-100), `[${timestamp}] ${msg}`]);
   };
 
   const testBybitConnection = async () => {
     setBybitTesting(true);
     try {
-      const data = await fetch("/api/test-bybit").then(r => r.json());
+      const data = await fetch("/api/test-bybit").then((r) => r.json());
       setBybitStatus({ tested: true, success: Boolean(data.success), latencyMs: data.latencyMs, serverTime: data.serverTime, environment: data.environment, error: data.error });
       addDiagLog(data.success ? `Bybit Demo API reachable (${data.latencyMs}ms)` : `Bybit API error: ${data.error}`);
     } catch (err) {
@@ -39,7 +46,7 @@ export function SettingsPage({ settings, updateSetting, systemLogs = [] }: Setti
   const testTelegramAlert = async () => {
     setTelegramTesting(true);
     try {
-      const data = await fetch("/api/test-telegram", { method: "POST" }).then(r => r.json());
+      const data = await fetch("/api/test-telegram", { method: "POST" }).then((r) => r.json());
       setTelegramStatus({ tested: true, success: Boolean(data.success), message: data.message, error: data.error || data.message });
       addDiagLog(data.success ? "Telegram test alert delivered" : `Telegram alert failure: ${data.error || data.message}`);
     } catch (err) {
@@ -52,8 +59,8 @@ export function SettingsPage({ settings, updateSetting, systemLogs = [] }: Setti
   };
 
   useEffect(() => {
-    testBybitConnection();
-    addDiagLog("Diagnostics initialized. Strict production risk caps are locked by the backend.");
+    void testBybitConnection();
+    addDiagLog("Diagnostics initialized. Risk policy values are sourced from the backend runtime model.");
   }, []);
 
   useEffect(() => {
@@ -61,29 +68,55 @@ export function SettingsPage({ settings, updateSetting, systemLogs = [] }: Setti
   }, [localLogs, systemLogs]);
 
   const strictControls = [
-    ["Leverage", "10x", true],
-    ["Position margin max", "$50", true],
-    ["Approx. base notional", "~$500", false],
-    ["Max concurrent positions", "3", true],
-    ["Same-symbol duplicate", "Blocked", false],
-    ["Post-close cooldown", "10 minutes", true],
-    ["Daily net entry breaker", "-$50", true],
-    ["3-loss pause", "30 minutes", false],
-    ["Breaker scope", "New entries only", false],
-    ["Stop-loss discipline", "Never widened", false],
-  ];
+    ["Leverage", `${runtimeStatus.leverage}x`, true],
+    ["Position margin max", `$${runtimeStatus.marginCapUsdt}`, true],
+    ["Approx. max notional", `~$${runtimeStatus.approximateMaxNotionalUsdt}`, false],
+    ["Max concurrent positions", String(runtimeStatus.maxPositions), true],
+    ["Same-symbol duplicate", runtimeStatus.duplicateSymbolPolicy === "DENY_SAME_SYMBOL" ? "Blocked" : runtimeStatus.duplicateSymbolPolicy, false],
+    ["Post-close cooldown", formatDuration(runtimeStatus.cooldown.symbolMs), true],
+    ["Daily net entry breaker", `$${runtimeStatus.dailyLossBreaker.limitUsdt}`, true],
+    ["Consecutive-loss pause", `${runtimeStatus.consecutiveLossBreaker.losses} losses / ${formatDuration(runtimeStatus.consecutiveLossBreaker.pauseMs)}`, false],
+    ["Breaker scope", runtimeStatus.dailyLossBreaker.scope.replaceAll("_", " "), false],
+    ["Stop-loss discipline", runtimeStatus.stopLossDiscipline.neverWiden ? "Never widened" : runtimeStatus.stopLossDiscipline.mode, false],
+  ] as const;
+
+  const runtimeRows = [
+    ["Bot", runtimeStatus.botRunning ? "Running" : "Stopped", runtimeStatus.botRunning],
+    ["Scanner", runtimeStatus.scannerRunning ? "Running" : "Stopped", runtimeStatus.scannerRunning],
+    ["Auto-trade", runtimeStatus.autoTrade ? "Enabled" : "Disabled", runtimeStatus.autoTrade],
+    ["Entry breaker", runtimeStatus.breakerActive ? runtimeStatus.breakerReason || "Active" : "Clear", !runtimeStatus.breakerActive],
+    ["Bybit private API", runtimeStatus.bybitPrivateApiHealth.status, runtimeStatus.bybitPrivateApiHealth.healthy],
+    ["Bybit private WS", runtimeStatus.bybitPrivateWsHealth.status, runtimeStatus.bybitPrivateWsHealth.healthy],
+  ] as const;
 
   return (
     <div className="space-y-6 max-w-5xl">
       <header className="pb-4 border-b border-neutral-800">
         <h1 className="text-3xl font-bold tracking-tight text-white mb-1">Risk & Settings</h1>
-        <p className="text-neutral-400 text-sm">Production strict risk caps are locked by the backend. Existing positions continue management when entry breakers are active.</p>
+        <p className="text-neutral-400 text-sm">Runtime risk policy and health come from one backend-owned status model. Existing positions remain managed when entry breakers are active.</p>
       </header>
+
+      <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 sm:p-6">
+        <div className="flex items-center gap-3 mb-4"><ShieldCheck className="w-5 h-5 text-emerald-400" /><div><h2 className="font-bold text-white">Canonical Runtime Status</h2><p className="text-xs text-neutral-400">Live backend state; no duplicated frontend risk constants.</p></div></div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {runtimeRows.map(([label, value, healthy]) => (
+            <div key={label} className="bg-neutral-950 border border-neutral-800 rounded-lg p-3">
+              <p className="text-[11px] text-neutral-500">{label}</p>
+              <p className={`text-sm font-bold mt-1 ${healthy ? "text-emerald-300" : "text-amber-300"}`}>{value}</p>
+            </div>
+          ))}
+        </div>
+        <div className="mt-3 text-xs text-neutral-400">
+          Last successful risk-data refresh: {runtimeStatus.lastSuccessfulRiskDataRefresh ? new Date(runtimeStatus.lastSuccessfulRiskDataRefresh).toLocaleString() : "Unavailable"}
+        </div>
+        {runtimeStatus.bybitPrivateApiHealth.lastError && <p className="mt-2 text-xs text-rose-300">Private API: {runtimeStatus.bybitPrivateApiHealth.lastError}</p>}
+        {runtimeStatus.bybitPrivateWsHealth.lastError && <p className="mt-1 text-xs text-rose-300">Private WS: {runtimeStatus.bybitPrivateWsHealth.lastError}</p>}
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5">
           <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2.5"><Wifi className="w-5 h-5 text-blue-400" /><div><h2 className="font-bold text-white">Bybit Demo API</h2><p className="text-xs text-neutral-400">REST V5 / Unified account</p></div></div>
+            <div className="flex items-center gap-2.5"><Wifi className="w-5 h-5 text-blue-400" /><div><h2 className="font-bold text-white">Bybit Demo API Ping</h2><p className="text-xs text-neutral-400">Connectivity diagnostic only; private risk health is shown above.</p></div></div>
             {bybitStatus?.tested && <span className={`text-xs font-semibold ${bybitStatus.success ? "text-emerald-400" : "text-rose-400"}`}>{bybitStatus.success ? "Connected" : "Error"}</span>}
           </div>
           <div className="bg-neutral-950 rounded-lg border border-neutral-800 p-3 text-xs space-y-2 mb-4">
@@ -102,34 +135,31 @@ export function SettingsPage({ settings, updateSetting, systemLogs = [] }: Setti
       </div>
 
       <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 sm:p-6">
-        <div className="flex items-center gap-3 mb-4"><ShieldCheck className="w-5 h-5 text-emerald-400" /><div><h2 className="font-bold text-white">Locked Execution & Risk Controls</h2><p className="text-xs text-neutral-400">These values reflect the live strict runtime and are not reset by analytics baseline actions.</p></div></div>
+        <div className="flex items-center gap-3 mb-4"><ShieldCheck className="w-5 h-5 text-emerald-400" /><div><h2 className="font-bold text-white">Locked Execution & Risk Controls</h2><p className="text-xs text-neutral-400">Values below are rendered directly from the canonical runtime model.</p></div></div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {strictControls.map(([label, value, locked]) => <div key={String(label)} className="bg-neutral-950 border border-neutral-800 rounded-lg p-3"><p className="text-[11px] text-neutral-500">{label}</p><p className="text-sm font-bold text-white mt-1">{value}</p>{locked && <p className="text-[10px] text-amber-300 mt-1">Locked by strict risk profile</p>}</div>)}
+          {strictControls.map(([label, value, locked]) => <div key={label} className="bg-neutral-950 border border-neutral-800 rounded-lg p-3"><p className="text-[11px] text-neutral-500">{label}</p><p className="text-sm font-bold text-white mt-1">{value}</p>{locked && <p className="text-[10px] text-amber-300 mt-1">Locked by backend risk profile</p>}</div>)}
         </div>
-        <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-950/10 p-3 text-xs text-amber-200 flex items-start gap-2"><ShieldAlert className="w-4 h-4 mt-0.5 shrink-0" /><span>The daily -$50 breaker blocks <strong>new entries only</strong>. It does not stop the engine, disable scanner auto-trade, close positions, or reset settings/history.</span></div>
+        <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-950/10 p-3 text-xs text-amber-200 flex items-start gap-2"><ShieldAlert className="w-4 h-4 mt-0.5 shrink-0" /><span>The daily breaker threshold is <strong>${runtimeStatus.dailyLossBreaker.limitUsdt}</strong> and its scope is <strong>{runtimeStatus.dailyLossBreaker.scope.replaceAll("_", " ")}</strong>. Risk-data unavailability also blocks new entries.</span></div>
       </div>
 
       <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 sm:p-6">
-        <div className="flex items-center gap-3 mb-5"><Sliders className="w-5 h-5 text-blue-400" /><div><h2 className="font-bold text-white">Trade Brackets & Adaptive Protection</h2><p className="text-xs text-neutral-400">Automated scanner entries use ATR/structure-aware initial SL; the UI does not present the legacy fixed-1% stop as runtime behavior.</p></div></div>
+        <div className="flex items-center gap-3 mb-5"><Sliders className="w-5 h-5 text-blue-400" /><div><h2 className="font-bold text-white">Trade Brackets & Adaptive Protection</h2><p className="text-xs text-neutral-400">The stop-loss discipline shown here is sourced from the backend runtime policy.</p></div></div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5 text-xs">
           <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-4 space-y-1 text-neutral-300">
             <p className="font-bold text-blue-300">Initial adaptive SL</p>
-            <p>ATR14 from confirmed 5m candles · multiplier 1.20x–1.50x</p>
-            <p>Structure lookback: recent 6 confirmed 5m candles</p>
-            <p>Long: swing low − 0.15×ATR · Short: swing high + 0.15×ATR</p>
-            <p>Distance bounded to 1.00%–1.80%; wider SL reduces notional to preserve approximate gross price-risk.</p>
+            <p>Mode: {runtimeStatus.stopLossDiscipline.mode.replaceAll("_", " ")}</p>
+            <p>Initial distance: {runtimeStatus.stopLossDiscipline.minInitialDistancePercent.toFixed(2)}%–{runtimeStatus.stopLossDiscipline.maxInitialDistancePercent.toFixed(2)}%</p>
           </div>
           <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-4 space-y-1 text-neutral-300">
             <p className="font-bold text-amber-300">Break-even / trailing</p>
-            <p>Trigger = max(1.00%, initial SL distance %, 1.25×ATR%)</p>
-            <p>Trailing begins only after the same quality threshold.</p>
-            <p>Break-even and trailing only tighten risk; SL is never widened after entry.</p>
+            <p>ATR quality multiple: {runtimeStatus.stopLossDiscipline.breakEvenAtrMultiple.toFixed(2)}×</p>
+            <p>{runtimeStatus.stopLossDiscipline.neverWiden ? "Break-even and trailing may only tighten risk; SL is never widened." : "See backend stop-loss policy."}</p>
           </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <SettingInput label="Take Profit %" value={settings.tpPercent} min={0.1} max={10} step={0.1} onChange={v => updateSetting("tpPercent", v)} icon={<Activity className="w-4 h-4 text-emerald-400" />} />
-          <SettingInput label="SL risk reference %" value={settings.slPercent} min={0.1} max={5} step={0.1} onChange={v => updateSetting("slPercent", v)} icon={<ShieldAlert className="w-4 h-4 text-rose-400" />} />
-          <SettingInput label="Trailing Stop %" value={settings.trailingStopPercent} min={0.1} max={5} step={0.1} onChange={v => updateSetting("trailingStopPercent", v)} icon={<Flame className="w-4 h-4 text-amber-400" />} />
+          <SettingInput label="Take Profit %" value={settings.tpPercent} min={0.1} max={10} step={0.1} onChange={(v) => updateSetting("tpPercent", v)} icon={<Activity className="w-4 h-4 text-emerald-400" />} />
+          <SettingInput label="SL risk reference %" value={settings.slPercent} min={0.1} max={5} step={0.1} onChange={(v) => updateSetting("slPercent", v)} icon={<ShieldAlert className="w-4 h-4 text-rose-400" />} />
+          <SettingInput label="Trailing Stop %" value={settings.trailingStopPercent} min={0.1} max={5} step={0.1} onChange={(v) => updateSetting("trailingStopPercent", v)} icon={<Flame className="w-4 h-4 text-amber-400" />} />
         </div>
       </div>
 
@@ -146,5 +176,5 @@ export function SettingsPage({ settings, updateSetting, systemLogs = [] }: Setti
 }
 
 function SettingInput({ label, value, min, max, step, onChange, icon }: { label: string; value: number; min: number; max: number; step: number; onChange: (value: number) => void; icon: ReactNode }) {
-  return <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-4"><label className="text-xs text-neutral-300 flex items-center gap-2 mb-2">{icon}{label}</label><input type="number" min={min} max={max} step={step} value={value} onChange={e => onChange(Number(e.target.value))} className="w-full bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white" /></div>;
+  return <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-4"><label className="text-xs text-neutral-300 flex items-center gap-2 mb-2">{icon}{label}</label><input type="number" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} className="w-full bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white" /></div>;
 }

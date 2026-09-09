@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
-  STRICT_MAX_CONCURRENT_POSITIONS,
   formatFinite,
   getFreshCrossLabel,
   getScannerTimingDisplay,
@@ -82,10 +81,10 @@ assert.equal(getFreshCrossLabel("bearish", 1), "Bearish Cross · 1 candle ago");
 assert.equal(getFreshCrossLabel("none", null), "—");
 assert.equal(getFreshCrossLabel(undefined, undefined), "—");
 
-assert.equal(STRICT_MAX_CONCURRENT_POSITIONS, 3);
 const scannerSource = fs.readFileSync("src/components/MarketScannerTable.tsx", "utf8");
-assert.ok(!scannerSource.includes('option value="5"'));
-assert.ok(scannerSource.includes("Locked by strict risk profile"));
+assert.ok(scannerSource.includes("{maxConcurrent}"));
+assert.ok(!scannerSource.includes("STRICT_MAX_CONCURRENT_POSITIONS"));
+assert.ok(scannerSource.includes("Backend runtime policy"));
 assert.ok(!scannerSource.includes('item.trend === "Bullish" ? "EMA9 > EMA21"'));
 
 console.log("scanner timing display regression tests passed");

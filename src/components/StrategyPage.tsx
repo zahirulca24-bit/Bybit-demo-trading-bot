@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Plus, X, Activity, ShieldCheck, Zap, Layers, RefreshCw } from "lucide-react";
-import { Technicals, TradeHistory, KlineUpdatePayload, ScannerState, Position, PipelineState } from "../types";
+import { Technicals, TradeHistory, KlineUpdatePayload, ScannerState, Position, PipelineState, RuntimeRiskStatus } from "../types";
 import { SixGatePipelineVisualizer } from "./SixGatePipelineVisualizer";
 import { ScannedPairsTable } from "./ScannedPairsTable";
 import { HighDensityScannerGrid } from "./HighDensityScannerGrid";
@@ -14,6 +14,7 @@ interface StrategyPageProps {
   latestKlineUpdate?: KlineUpdatePayload | null;
   prices?: Record<string, number>;
   scannerState: ScannerState;
+  runtimeStatus: RuntimeRiskStatus;
   activePositions: Position[];
   onToggleAutoTrade: (autoTrade: boolean) => void;
   onScanNow: () => void;
@@ -30,11 +31,11 @@ export function StrategyPage({
   latestKlineUpdate,
   prices = {},
   scannerState,
+  runtimeStatus,
   activePositions = [],
   onToggleAutoTrade,
   onScanNow,
   onRefreshMarkets,
-  onSetMaxConcurrent,
   onQuickBuy,
 }: StrategyPageProps) {
   const [selectedSymbol, setSelectedSymbol] = useState<string>("BTCUSDT");
@@ -59,28 +60,28 @@ export function StrategyPage({
   };
 
   useEffect(() => {
-    fetchPipeline(false);
-    const interval = setInterval(() => fetchPipeline(false), 15000);
+    void fetchPipeline(false);
+    const interval = setInterval(() => void fetchPipeline(false), 15000);
     return () => clearInterval(interval);
   }, []);
 
+  const cooldownMinutes = Math.round(runtimeStatus.cooldown.symbolMs / 60_000);
+  const lossPauseMinutes = Math.round(runtimeStatus.consecutiveLossBreaker.pauseMs / 60_000);
   const executionControls = [
     "EMA50/200 = hard trend filter",
     "EMA9/21 = soft entry timing / quality confirmation",
     "Breakout = soft bonus only",
-    "Max positions 3",
-    "$50 margin at 10x (~$500 notional)",
-    "No duplicate same-symbol position",
-    "10m same-symbol post-close cooldown",
-    "Daily -$50 net entry breaker",
-    "3 losses => 30m pause",
-    "Breaker blocks new entries only",
-    "Adaptive SL: ATR14 confirmed 5m, multiplier 1.20x–1.50x",
-    "Structure: recent 6 confirmed 5m candles; swing ± 0.15×ATR",
-    "Initial SL distance: 1.00%–1.80%; wider SL reduces notional",
-    "BE/trailing trigger: max(1.00%, initial SL distance, 1.25×ATR%)",
-    "Trailing starts after the same threshold and only tightens risk",
-    "SL never widened",
+    `Max positions ${runtimeStatus.maxPositions}`,
+    `$${runtimeStatus.marginCapUsdt} margin at ${runtimeStatus.leverage}x (~$${runtimeStatus.approximateMaxNotionalUsdt} notional)`,
+    runtimeStatus.duplicateSymbolPolicy === "DENY_SAME_SYMBOL" ? "No duplicate same-symbol position" : runtimeStatus.duplicateSymbolPolicy,
+    `${cooldownMinutes}m same-symbol post-close cooldown`,
+    `Daily $${runtimeStatus.dailyLossBreaker.limitUsdt} net entry breaker`,
+    `${runtimeStatus.consecutiveLossBreaker.losses} losses => ${lossPauseMinutes}m pause`,
+    `Breaker scope: ${runtimeStatus.dailyLossBreaker.scope.replaceAll("_", " ")}`,
+    `Adaptive SL mode: ${runtimeStatus.stopLossDiscipline.mode.replaceAll("_", " ")}`,
+    `Initial SL distance: ${runtimeStatus.stopLossDiscipline.minInitialDistancePercent.toFixed(2)}%–${runtimeStatus.stopLossDiscipline.maxInitialDistancePercent.toFixed(2)}%`,
+    `Break-even ATR quality multiple: ${runtimeStatus.stopLossDiscipline.breakEvenAtrMultiple.toFixed(2)}×`,
+    runtimeStatus.stopLossDiscipline.neverWiden ? "SL never widened" : "Stop-loss policy supplied by backend",
   ];
 
   return (
@@ -106,7 +107,7 @@ export function StrategyPage({
               </button>
             </div>
             {activeTab === "pipeline" && (
-              <button onClick={() => fetchPipeline(true)} disabled={isPipelineScanning} className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-800 hover:border-neutral-700 text-neutral-300 hover:text-white text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer" title="Force refresh 6-Gate scan">
+              <button onClick={() => void fetchPipeline(true)} disabled={isPipelineScanning} className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-800 hover:border-neutral-700 text-neutral-300 hover:text-white text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer" title="Force refresh 6-Gate scan">
                 <RefreshCw className={`w-3.5 h-3.5 ${isPipelineScanning ? "animate-spin text-blue-400" : ""}`} />
                 <span>{isPipelineScanning ? "Scanning..." : "Scan"}</span>
               </button>
@@ -123,7 +124,7 @@ export function StrategyPage({
             passedAllCount={pipelineData?.passedAllCount ?? null}
             activeSignalsCount={pipelineData?.activeSignalsCount ?? null}
             isScanning={isPipelineScanning}
-            onRefresh={() => fetchPipeline(true)}
+            onRefresh={() => void fetchPipeline(true)}
           />
           <ScannedPairsTable symbols={pipelineData?.symbols || []} selectedSymbol={activeSymbol} onSelectSymbol={setSelectedSymbol} onQuickBuy={onQuickBuy} isScanning={isPipelineScanning} />
         </div>
@@ -134,7 +135,7 @@ export function StrategyPage({
       )}
 
       {activeTab === "turnover" && (
-        <MarketScannerTable scannerState={scannerState} activePositions={activePositions} selectedSymbol={activeSymbol} onSelectSymbol={setSelectedSymbol} onToggleAutoTrade={onToggleAutoTrade} onScanNow={onScanNow} onRefreshMarkets={onRefreshMarkets} onSetMaxConcurrent={onSetMaxConcurrent} onQuickBuy={onQuickBuy} />
+        <MarketScannerTable scannerState={scannerState} activePositions={activePositions} selectedSymbol={activeSymbol} onSelectSymbol={setSelectedSymbol} onToggleAutoTrade={onToggleAutoTrade} onScanNow={onScanNow} onRefreshMarkets={onRefreshMarkets} onQuickBuy={onQuickBuy} />
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -174,7 +175,7 @@ export function StrategyPage({
 
           <div className="pt-3 border-t border-neutral-800 text-[11px] text-neutral-500 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
             <span>Confirmed closed candles only · EMA9/21 never blocks an otherwise valid six-gate setup</span>
-            <span>Existing positions remain managed when entry breaker is active</span>
+            <span>{runtimeStatus.breakerActive ? `Entry breaker: ${runtimeStatus.breakerReason}` : "Entry breaker clear"}</span>
           </div>
         </div>
 

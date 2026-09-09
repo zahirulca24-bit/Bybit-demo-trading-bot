@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { buildRiskAccounting, evaluateEntryRiskAccounting, fetchClosedPnlRange, RISK_DATA_UNAVAILABLE } from "./dailyRiskAccounting";
+import { DAILY_PNL_UNAVAILABLE, buildRiskAccounting, evaluateEntryRiskAccounting, fetchClosedPnlRange } from "./dailyRiskAccounting";
 
 async function run() {
   const start = Date.parse("2026-09-09T00:00:00.000Z");
@@ -26,20 +26,59 @@ async function run() {
   const loaded = await fetchClosedPnlRange(pagedClient, start, end, 10);
   assert.equal(loaded.ok, true);
   assert.equal(loaded.items.length, 205);
-  assert.ok(calls >= 3, "risk history must paginate beyond 100 rows");
+  assert.equal(calls, 3, "daily ClosedPnL must follow every cursor until the requested range is exhausted");
 
   const failed = await fetchClosedPnlRange({
     async getClosedPnL() { throw new Error("network down"); },
   }, start, end);
   assert.equal(failed.ok, false);
+  if (!failed.ok) assert.equal(failed.reason, DAILY_PNL_UNAVAILABLE);
+
+  const rejected = await fetchClosedPnlRange({
+    async getClosedPnL() { return { retCode: 10006, retMsg: "rate limited" }; },
+  }, start, end);
+  assert.equal(rejected.ok, false, "non-zero Bybit retCode must fail closed");
+
+  let repeatedCalls = 0;
+  const repeatedCursor = await fetchClosedPnlRange({
+    async getClosedPnL() {
+      repeatedCalls++;
+      return {
+        retCode: 0,
+        result: {
+          list: [{ closedPnl: "1", updatedTime: String(end - 1000) }],
+          nextPageCursor: "same-cursor",
+        },
+      };
+    },
+  }, start, end, 10);
+  assert.equal(repeatedCursor.ok, false, "repeated cursor must not silently produce incomplete daily PnL");
+  assert.ok(repeatedCalls >= 2);
+
+  const maxPageFailure = await fetchClosedPnlRange({
+    async getClosedPnL(params: any) {
+      return {
+        retCode: 0,
+        result: {
+          list: [{ closedPnl: "1", updatedTime: String(end - 1000) }],
+          nextPageCursor: String(Number(params.cursor || 0) + 1),
+        },
+      };
+    },
+  }, start, end, 2);
+  assert.equal(maxPageFailure.ok, false, "pagination safety limit must fail closed instead of using a partial daily total");
 
   const accounting = buildRiskAccounting(failed, [{ unrealisedPnl: "-2.50" }], start);
   assert.equal(accounting.available, false);
   assert.equal(accounting.realized, null, "failed history must never become realized=0");
-  assert.equal(accounting.net, null);
+  assert.equal(accounting.net, null, "unknown daily net must remain unknown");
   const decision = evaluateEntryRiskAccounting(accounting, -50);
-  assert.equal(decision.allowed, false, "new entries must fail closed when risk history is unavailable");
-  assert.match(decision.reason || "", new RegExp(RISK_DATA_UNAVAILABLE));
+  assert.equal(decision.allowed, false, "new entries must fail closed when daily PnL is unavailable");
+  assert.equal(decision.reason, DAILY_PNL_UNAVAILABLE);
+
+  const knownZero = buildRiskAccounting({ ok: true, items: [] }, [], start);
+  assert.equal(knownZero.realized, 0, "successful empty ClosedPnL is a known zero, distinct from unavailable");
+  assert.equal(knownZero.net, 0);
 
   const healthy = buildRiskAccounting({ ok: true, items: [
     { closedPnl: "-48", updatedTime: String(start + 1000) },

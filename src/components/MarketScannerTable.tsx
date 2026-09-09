@@ -10,12 +10,7 @@ import {
   Zap,
 } from "lucide-react";
 import { Position, ScannerState } from "../types";
-import {
-  STRICT_MAX_CONCURRENT_POSITIONS,
-  finiteNumber,
-  formatFinite,
-  getScannerTimingDisplay,
-} from "../utils/scannerTimingDisplay";
+import { finiteNumber, formatFinite, getScannerTimingDisplay } from "../utils/scannerTimingDisplay";
 
 interface MarketScannerTableProps {
   scannerState: ScannerState;
@@ -25,7 +20,6 @@ interface MarketScannerTableProps {
   onToggleAutoTrade: (autoTrade: boolean) => void;
   onScanNow: () => void;
   onRefreshMarkets: () => void;
-  onSetMaxConcurrent: (max: number) => void;
   onQuickBuy: (symbol: string) => void;
 }
 
@@ -66,7 +60,7 @@ export function MarketScannerTable({
   const [filterTab, setFilterTab] = useState<"all" | "signals" | "bullish" | "bearish" | "in_position">("all");
   const [searchQuery, setSearchQuery] = useState("");
 
-  const { markets = [], autoTrade, isScanning, lastScanTime } = scannerState;
+  const { markets = [], autoTrade, maxConcurrent, isScanning, lastScanTime } = scannerState;
   const tradeSignals = useMemo(() => markets.filter((m) => m.signal === "BUY_SIGNAL" || m.signal === "SELL_SIGNAL"), [markets]);
   const bullishCount = useMemo(() => markets.filter((m) => m.trend === "Bullish").length, [markets]);
   const bearishCount = useMemo(() => markets.filter((m) => m.trend === "Bearish").length, [markets]);
@@ -106,8 +100,8 @@ export function MarketScannerTable({
           <div className="bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-xs">
             <div className="text-neutral-500">Max Concurrent Positions</div>
             <div className="flex items-center gap-2 mt-0.5">
-              <span className="font-bold text-white">{STRICT_MAX_CONCURRENT_POSITIONS}</span>
-              <span className="text-[10px] text-amber-300">Locked by strict risk profile</span>
+              <span className="font-bold text-white">{maxConcurrent}</span>
+              <span className="text-[10px] text-amber-300">Backend runtime policy</span>
             </div>
           </div>
 
@@ -133,7 +127,7 @@ export function MarketScannerTable({
         <div className="p-3 sm:px-5"><div className="text-[11px] text-neutral-400">Scanned Universe</div><div className="font-bold text-white mt-1">{markets.length} pairs</div></div>
         <div className="p-3 sm:px-5"><div className="text-[11px] text-neutral-400">Trade Signals</div><div className="font-bold text-emerald-400 mt-1">{tradeSignals.length}</div></div>
         <div className="p-3 sm:px-5"><div className="text-[11px] text-neutral-400">Trend Distribution</div><div className="text-xs mt-1"><span className="text-emerald-400">{bullishCount} Bullish</span> <span className="text-neutral-600">/</span> <span className="text-rose-400">{bearishCount} Bearish</span></div></div>
-        <div className="p-3 sm:px-5"><div className="text-[11px] text-neutral-400">Active Positions</div><div className="font-bold text-blue-400 mt-1">{activePositions.length} / {STRICT_MAX_CONCURRENT_POSITIONS}</div></div>
+        <div className="p-3 sm:px-5"><div className="text-[11px] text-neutral-400">Active Positions</div><div className="font-bold text-blue-400 mt-1">{activePositions.length} / {maxConcurrent}</div></div>
       </div>
 
       <div className="p-3 sm:px-5 border-b border-neutral-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -225,7 +219,7 @@ export function MarketScannerTable({
                   <td className="py-3 px-4 text-right">
                     <div className="flex justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
                       <button onClick={() => onSelectSymbol(item.symbol)} className="px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs">Chart</button>
-                      <button onClick={() => onQuickBuy(item.symbol)} className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1" title="Manual quick buy; separate from scanner signal direction"><ArrowUpRight className="w-3 h-3" /> Quick Buy</button>
+                      <button onClick={() => onQuickBuy(item.symbol)} className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1" title="Risk-sized manual quick buy; backend revalidates final quantity"><ArrowUpRight className="w-3 h-3" /> Quick Buy</button>
                     </div>
                   </td>
                 </tr>
