@@ -148,3 +148,14 @@ Strict runtime values shown in the UI are: turnover **>= $25M**, EMA50/EMA200 di
 Automated scanner SL is ATR/structure-aware: ATR14 on confirmed 5m candles, **1.20x–1.50x ATR**, recent **6** confirmed 5m candles for structure, long swing low minus **0.15×ATR**, short swing high plus **0.15×ATR**, and initial distance bounded to **1.00%–1.80%**. Wider SL reduces notional rather than increasing approximate gross price-risk. Break-even/trailing waits for `max(1.00%, initial SL distance %, 1.25×ATR%)`, starts trailing only after the same threshold, and never widens SL.
 
 Exit labels are backend-provided **TP / SL / Trailing / Manual / Other / Unknown**. `Unknown` means Bybit metadata was insufficient for reliable classification; the frontend never maps losing trades to SL or winning trades to TP. UTC daily cards use **Trading Day: UTC** and **Window: 00:00 UTC → now**. Performance Baseline remains independent from UTC daily trading statistics.
+
+
+## EMA9 / EMA21 Entry-Timing Quality Layer — 2026-09-09
+
+The official auto-entry strategy remains the strict six-gate strategy. **EMA50/EMA200 is the hard trend filter; EMA9/EMA21 is a soft entry-timing / quality confirmation layer only.** EMA9/21 never rejects an otherwise valid six-gate setup and no daily trade-count cap is used.
+
+EMA9 and EMA21 are calculated only from **confirmed closed 5m candles** with sufficient history. Timing contribution is capped at **2.0 points**: +1 for directional EMA9/21 alignment, +1 for a matching fresh crossover within the latest 1–3 confirmed candles, +0.5 for EMA9 slope agreeing with direction, and +0.5 when the confirmed close is on the correct side of both EMA9 and EMA21. The raw contribution is capped at 2.0. Choppy timing can reduce this soft score by 0.5 for two or more back-and-forth crosses in the latest six transitions, 0.25 when the EMA gap is below 0.03% of price, and 0.25 when EMA9 slope magnitude is below 0.01% of price. The timing score is floored at zero and **never becomes a hard gate**.
+
+For strict setups that pass all six hard gates, the displayed setup score is `6 + EMA timing score + 0.5 breakout bonus (when present)`. Breakout remains soft-only. Candidates are quality-ranked by this score, but every valid strict signal remains eligible subject only to the existing risk controls.
+
+The old `MarketScanner5m` path is now explicitly **Legacy / Informational Scanner** only. It is isolated from production auto-entry and Telegram execution alerts, no scheduler is started for it, and its API is manual informational inspection only. It also requires real confirmed 5m history for a true EMA200; it no longer substitutes a shorter EMA when history is insufficient.

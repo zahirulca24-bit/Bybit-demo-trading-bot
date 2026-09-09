@@ -46,7 +46,7 @@ export function MarketScannerTable({
   const { markets = [], autoTrade, maxConcurrent, isScanning, lastScanTime } = scannerState;
 
   // Derive counts
-  const buySignals = useMemo(() => markets.filter((m) => m.signal === "BUY_SIGNAL"), [markets]);
+  const tradeSignals = useMemo(() => markets.filter((m) => m.signal === "BUY_SIGNAL" || m.signal === "SELL_SIGNAL"), [markets]);
   const bullishCount = useMemo(() => markets.filter((m) => m.trend === "Bullish").length, [markets]);
   const bearishCount = useMemo(() => markets.filter((m) => m.trend === "Bearish").length, [markets]);
   const inPositionCount = useMemo(() => markets.filter((m) => m.signal === "IN_POSITION").length, [markets]);
@@ -61,7 +61,7 @@ export function MarketScannerTable({
       }
 
       // Filter Tab
-      if (filterTab === "signals") return item.signal === "BUY_SIGNAL";
+      if (filterTab === "signals") return item.signal === "BUY_SIGNAL" || item.signal === "SELL_SIGNAL";
       if (filterTab === "bullish") return item.trend === "Bullish";
       if (filterTab === "bearish") return item.trend === "Bearish";
       if (filterTab === "in_position") return item.signal === "IN_POSITION" || activePositions.some(p => p.symbol === item.symbol);
@@ -72,7 +72,7 @@ export function MarketScannerTable({
 
   // Helper formatting for turnover
   const formatTurnover = (val?: number) => {
-    if (!val || val === 0 || isNaN(val)) return "$0";
+    if (val === undefined || val === null || !Number.isFinite(val)) return "—";
     if (val >= 1e9) return `$${(val / 1e9).toFixed(2)}B`;
     if (val >= 1e6) return `$${(val / 1e6).toFixed(1)}M`;
     if (val >= 1e3) return `$${(val / 1e3).toFixed(0)}K`;
@@ -80,7 +80,7 @@ export function MarketScannerTable({
   };
 
   const formatPrice = (price?: number) => {
-    if (price === undefined || price === null || isNaN(price)) return "$0.00";
+    if (price === undefined || price === null || !Number.isFinite(price)) return "—";
     if (price >= 1000) return `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     if (price >= 1) return `$${price.toFixed(3)}`;
     return `$${price.toFixed(5)}`;
@@ -108,7 +108,7 @@ export function MarketScannerTable({
               )}
             </div>
             <p className="text-xs text-neutral-400 mt-0.5">
-              Live Bybit V5 ranking of Top 20 USDT-Perpetuals by 24h volume. 1m EMA 9/21 cross & RSI 40-65 scanner.
+              Official auto-entry: strict six gates on confirmed candles. EMA50/200 = trend filter; EMA9/21 = soft entry timing / quality confirmation.
             </p>
           </div>
         </div>
@@ -138,7 +138,7 @@ export function MarketScannerTable({
                 ? "bg-emerald-950/40 text-emerald-300 border-emerald-500/40 hover:bg-emerald-900/50 shadow-sm"
                 : "bg-neutral-950 text-neutral-400 border-neutral-800 hover:text-white"
             }`}
-            title="When enabled, automatically submits a Market Buy with TP/SL when a Top 20 coin confirms Bullish Cross + RSI 40-65"
+            title="When enabled, executes only strict six-gate signals; EMA9/21 and breakout affect soft quality/ranking only"
           >
             <div className={`w-2 h-2 rounded-full ${autoTrade ? "bg-emerald-400 animate-pulse" : "bg-neutral-600"}`} />
             Auto-Trade Scanner: <span className={autoTrade ? "text-emerald-400" : "text-neutral-500"}>{autoTrade ? "ON" : "OFF"}</span>
@@ -180,10 +180,10 @@ export function MarketScannerTable({
         <div className="p-3.5 px-5">
           <div className="text-[11px] text-neutral-400 font-medium">Active Buy Signals</div>
           <div className="text-base font-bold mt-0.5 flex items-center gap-1.5">
-            <span className={buySignals.length > 0 ? "text-emerald-400" : "text-neutral-400"}>
-              {buySignals.length} Confirmed
+            <span className={tradeSignals.length > 0 ? "text-emerald-400" : "text-neutral-400"}>
+              {tradeSignals.length} Confirmed
             </span>
-            {buySignals.length > 0 && (
+            {tradeSignals.length > 0 && (
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
             )}
           </div>
@@ -230,7 +230,7 @@ export function MarketScannerTable({
                 : "text-neutral-400 hover:text-emerald-300"
             }`}
           >
-            🚀 Buy Signals ({buySignals.length})
+            🚀 Trade Signals ({tradeSignals.length})
           </button>
           <button
             onClick={() => setFilterTab("bullish")}
@@ -310,14 +310,14 @@ export function MarketScannerTable({
                 const isBullish = item.trend === "Bullish";
 
                 // RSI color and position
-                const rsi = typeof item.rsi === "number" && !isNaN(item.rsi) ? item.rsi : 50;
-                const isRsiPrime = rsi >= 40 && rsi <= 65;
-                const rsiColor = rsi > 70 ? "text-red-400" : rsi < 35 ? "text-purple-400" : isRsiPrime ? "text-emerald-400" : "text-blue-400";
-                const rsiBarColor = rsi > 70 ? "bg-red-500" : rsi < 35 ? "bg-purple-500" : isRsiPrime ? "bg-emerald-500" : "bg-blue-500";
-                const pricePcnt = typeof item.price24hPcnt === "number" && !isNaN(item.price24hPcnt) ? item.price24hPcnt : 0;
-                const ema9Val = typeof item.ema9 === "number" && !isNaN(item.ema9) ? item.ema9 : 0;
-                const ema21Val = typeof item.ema21 === "number" && !isNaN(item.ema21) ? item.ema21 : 0;
-                const priceVal = typeof item.price === "number" && !isNaN(item.price) ? item.price : 0;
+                const rsi = Number.isFinite(item.rsi) ? item.rsi : null;
+                const isRsiPrime = rsi !== null && ((item.trend === "Bullish" && rsi >= 50 && rsi <= 64) || (item.trend === "Bearish" && rsi >= 36 && rsi <= 50));
+                const rsiColor = isRsiPrime ? "text-emerald-400" : "text-blue-400";
+                const rsiBarColor = isRsiPrime ? "bg-emerald-500" : "bg-blue-500";
+                const pricePcnt = Number.isFinite(item.price24hPcnt) ? item.price24hPcnt : null;
+                const ema9Val = Number.isFinite(item.ema9) ? item.ema9 : null;
+                const ema21Val = Number.isFinite(item.ema21) ? item.ema21 : null;
+                const priceVal = Number.isFinite(item.price) ? Number(item.price) : null;
 
                 return (
                   <tr
@@ -352,7 +352,7 @@ export function MarketScannerTable({
                       <div className={`text-[11px] flex items-center gap-0.5 ${
                         pricePcnt >= 0 ? "text-emerald-400" : "text-red-400"
                       }`}>
-                        {pricePcnt >= 0 ? "+" : ""}{pricePcnt.toFixed(2)}%
+                        {pricePcnt === null ? "—" : `${pricePcnt >= 0 ? "+" : ""}${pricePcnt.toFixed(2)}%`}
                       </div>
                     </td>
 
@@ -366,7 +366,7 @@ export function MarketScannerTable({
                     <td className="py-3 px-4">
                       <div className="flex items-center gap-2">
                         <span className={`font-mono font-bold text-xs ${rsiColor}`}>
-                          {rsi.toFixed(1)}
+                          {rsi === null ? "—" : rsi.toFixed(1)}
                         </span>
                         {isRsiPrime && (
                           <span className="text-[9px] bg-emerald-500/10 text-emerald-400 px-1 rounded font-semibold">
@@ -377,7 +377,7 @@ export function MarketScannerTable({
                       <div className="w-24 bg-neutral-800 h-1.5 rounded-full mt-1.5 overflow-hidden">
                         <div
                           className={`h-full ${rsiBarColor} transition-all duration-300`}
-                          style={{ width: `${Math.min(100, Math.max(0, rsi))}%` }}
+                          style={{ width: `${rsi === null ? 0 : Math.min(100, Math.max(0, rsi))}%` }}
                         />
                       </div>
                     </td>
@@ -416,7 +416,7 @@ export function MarketScannerTable({
                     {/* Diagnostics */}
                     <td className="py-3 px-4 max-w-xs">
                       <div className="text-[11px] text-neutral-300 truncate" title={item.signalReason}>
-                        {item.signalReason || "Monitoring 1m candles..."}
+                        {item.signalReason || "Monitoring strict confirmed 5m scanner conditions..."}
                       </div>
                     </td>
 

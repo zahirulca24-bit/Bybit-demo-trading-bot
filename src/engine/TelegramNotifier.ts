@@ -81,18 +81,47 @@ export class TelegramNotifier {
     await this.send(msg);
   }
 
-  async sendScannerSignal(symbol: string, price: number, rsi: number, ema9: number, ema21: number, autoTraded: boolean) {
-    const numPrice = typeof price === "number" && !isNaN(price) ? price : 0;
-    const numRsi = typeof rsi === "number" && !isNaN(rsi) ? rsi : 50;
-    const numEma9 = typeof ema9 === "number" && !isNaN(ema9) ? ema9 : 0;
-    const numEma21 = typeof ema21 === "number" && !isNaN(ema21) ? ema21 : 0;
-    const msg = `📡 <b>Market Scanner Alert</b>\n\n` +
-      `<b>Symbol:</b> #${escapeHtml(symbol)}\n` +
-      `<b>Signal:</b> 🚀 Bullish Momentum &amp; EMA Cross\n` +
-      `<b>Current Price:</b> $${escapeHtml(numPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }))}\n` +
-      `<b>RSI (14):</b> ${escapeHtml(numRsi.toFixed(1))} (Prime 40-65 Zone)\n` +
-      `<b>EMA 9:</b> $${escapeHtml(numEma9.toFixed(2))} | <b>EMA 21:</b> $${escapeHtml(numEma21.toFixed(2))}\n` +
-      `<b>Auto-Execution:</b> ${autoTraded ? '✅ Market Order Dispatched' : '⏸️ Auto-Trade Disabled'}`;
+  async sendScannerSignal(
+    symbol: string,
+    side: "LONG" | "SHORT",
+    price: number,
+    rsi: number,
+    ema9: number | undefined,
+    ema21: number | undefined,
+    freshCross: "bullish" | "bearish" | "none" | undefined,
+    crossoverAgeCandles: number | null | undefined,
+    emaTimingScore: number | undefined,
+    finalSetupScore: number | undefined,
+    autoTraded: boolean
+  ) {
+    const timingValues = Number.isFinite(ema9) && Number.isFinite(ema21)
+      ? `$${Number(ema9).toFixed(4)} / $${Number(ema21).toFixed(4)}`
+      : "Unavailable";
+    const msg = `📡 <b>Strict Scanner Execution</b>
+
+` +
+      `<b>Symbol:</b> #${escapeHtml(symbol)}
+` +
+      `<b>Side:</b> ${escapeHtml(side)}
+` +
+      `<b>Hard strategy:</b> 6 gates passed on confirmed candles
+` +
+      `<b>Price:</b> $${escapeHtml(price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }))}
+` +
+      `<b>RSI (14):</b> ${escapeHtml(rsi.toFixed(1))}
+` +
+      `<b>EMA9 / EMA21 timing:</b> ${escapeHtml(timingValues)}
+` +
+      `<b>Fresh cross:</b> ${escapeHtml(freshCross || "none")}${crossoverAgeCandles !== null && crossoverAgeCandles !== undefined ? ` (${crossoverAgeCandles} candle(s) ago)` : ""}
+` +
+      `<b>Timing score:</b> ${emaTimingScore !== undefined ? escapeHtml(emaTimingScore.toFixed(2)) : "Unavailable"}/2
+` +
+      `<b>Setup score:</b> ${finalSetupScore !== undefined ? escapeHtml(finalSetupScore.toFixed(2)) : "Unavailable"}
+` +
+      `<b>Auto-Execution:</b> ${autoTraded ? '✅ Market Order Dispatched' : '⏸️ Auto-Trade Disabled'}
+
+` +
+      `<i>EMA9/21 is a soft entry-timing quality layer, not a mandatory gate.</i>`;
     await this.send(msg);
   }
 

@@ -8,7 +8,7 @@ import { RestClientV5 } from "bybit-api";
 import dotenv from "dotenv";
 import { EMA } from "technicalindicators";
 import { TradingEngine } from "./src/engine/TradingEngine";
-import { MarketScanner5m, Scanner5mSignal } from "./src/engine/MarketScanner5m";
+import { LegacyInformationalScanner5m } from "./src/engine/MarketScanner5m";
 import { SixGateFilteringPipeline } from "./src/engine/SixGateFilteringPipeline";
 import { initDatabase, dbGetClosedTrades } from "./src/db";
 import { getUtcTradingDayWindow, normalizeTimestampMs } from "./src/utils/utcTradingDay";
@@ -51,25 +51,8 @@ async function startServer() {
   const pipelineEngine = new SixGateFilteringPipeline(bybit);
   pipelineEngine.start();
 
-  const scanner5m = new MarketScanner5m(bybit, async (signal: Scanner5mSignal) => {
-    io.emit("scanner-5m:signal", signal);
-    io.emit("scanner5m:signal", signal);
-    engine.emitter.log(
-      `⚡ [5m Scanner] ${signal.grade} ${signal.side} Signal Detected on #${signal.symbol} @ $${signal.price} (RSI: ${signal.technicals.rsi14}, Vol: ${(signal.technicals.volumeRatio * 100).toFixed(0)}% avg)`
-    );
-    await engine.telegram.sendScanner5mSignal(
-      signal.symbol,
-      signal.side,
-      signal.grade,
-      signal.price,
-      signal.technicals.rsi14,
-      signal.technicals.ema50,
-      signal.technicals.ema200,
-      signal.technicals.volumeRatio,
-      signal.reason
-    );
-  });
-  scanner5m.startScheduler();
+  const scanner5m = new LegacyInformationalScanner5m(bybit);
+  engine.emitter.log("[Legacy / Informational Scanner] Isolated from auto-entry and Telegram. Manual API inspection only.");
 
   app.get("/api/balance", async (req, res) => {
     try {
@@ -595,7 +578,7 @@ async function startServer() {
       res.json({
         success: true,
         timeframe: "5m",
-        scanner: "50/200 EMA + RSI 14 + Volume Confirmation",
+        scanner: "Legacy / Informational Scanner — no order execution",
         timestamp: Date.now(),
         lastScanTime: scanner5m.lastScanTime,
         isScanning: scanner5m.isScanning,

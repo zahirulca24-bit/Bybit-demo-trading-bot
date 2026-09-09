@@ -104,13 +104,13 @@ export function HighDensityScannerGrid({
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="font-bold text-white text-base">5-Minute Candle Momentum Scanner</h2>
+              <h2 className="font-bold text-white text-base">Legacy / Informational Scanner</h2>
               <span className="px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 text-[10px] font-semibold flex items-center gap-1">
-                <Zap className="w-3 h-3" /> 50/200 EMA + RSI 14
+                <Zap className="w-3 h-3" /> Informational only
               </span>
             </div>
             <p className="text-xs text-neutral-400">
-              Scans closed 5m candles across active perpetual pairs for high-probability setups and volume confirmation.
+              Legacy informational 5m diagnostics only. It is isolated from auto-entry and Telegram execution signals.
             </p>
           </div>
         </div>
