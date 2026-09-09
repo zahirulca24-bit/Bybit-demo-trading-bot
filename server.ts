@@ -21,12 +21,12 @@ const requireAuth = (req: express.Request, res: express.Response, next: express.
   const secret = process.env.APP_SECRET;
   if (!secret) return next();
   const authHeader = req.headers.authorization;
-  const headerSecret = req.headers['x-app-secret'] || req.headers['x-session-token'];
-  let token = '';
-  if (authHeader && authHeader.startsWith('Bearer ')) token = authHeader.substring(7);
+  const headerSecret = req.headers["x-app-secret"] || req.headers["x-session-token"];
+  let token = "";
+  if (authHeader && authHeader.startsWith("Bearer ")) token = authHeader.substring(7);
   else if (headerSecret) token = headerSecret as string;
   if (token === secret) next();
-  else res.status(401).json({ success: false, error: 'Unauthorized: Invalid or missing API secret' });
+  else res.status(401).json({ success: false, error: "Unauthorized: Invalid or missing API secret" });
 };
 
 const isProd = process.env.NODE_ENV === "production";
@@ -44,7 +44,7 @@ async function startServer() {
   const bybit = new RestClientV5({
     key: process.env.BYBIT_API_KEY,
     secret: process.env.BYBIT_API_SECRET,
-    demoTrading: process.env.BYBIT_DEMO === 'true',
+    demoTrading: process.env.BYBIT_DEMO === "true",
     testnet: false,
   });
 
@@ -58,17 +58,24 @@ async function startServer() {
   const telegramReports = new TelegramReportService(bybit, engine, engine.telegram);
   telegramReports.start();
 
-  app.get("/api/balance", async (req, res) => {
+  app.get("/api/balance", async (_req, res) => {
     try {
       const response = await bybit.getWalletBalance({ accountType: "UNIFIED", coin: "USDT" });
-      const balance = response.result?.list?.[0]?.coin?.[0]?.walletBalance || "0";
-      res.json({ success: true, balance });
+      const coin = response.result?.list?.[0]?.coin?.find((item: any) => item.coin === "USDT");
+      if (response.retCode !== 0 || !coin || coin.walletBalance === undefined) {
+        return res.status(502).json({ success: false, error: response.retMsg || "Wallet balance unavailable" });
+      }
+      res.json({ success: true, balance: coin.walletBalance });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }
   });
 
-  app.get("/api/prices", (req, res) => {
+  app.get("/api/runtime-status", (_req, res) => {
+    res.json({ success: true, runtime: engine.getRuntimeRiskStatus() });
+  });
+
+  app.get("/api/prices", (_req, res) => {
     res.json({ success: true, prices: engine.currentPrices });
   });
 
@@ -102,40 +109,40 @@ async function startServer() {
     }
   });
 
-  app.get("/api/settings", (req, res) => {
-    res.json({ success: true, settings: engine.settings });
+  app.get("/api/settings", (_req, res) => {
+    res.json({ success: true, settings: { ...engine.settings, demoTrading: process.env.BYBIT_DEMO === "true" } });
   });
 
   app.post("/api/settings", requireAuth, (req, res) => {
     const { settings } = req.body;
     if (settings) {
       engine.updateSettings(settings);
-      res.json({ success: true, settings: engine.settings });
+      res.json({ success: true, settings: engine.settings, runtime: engine.getRuntimeRiskStatus() });
     } else res.status(400).json({ success: false, message: "Missing settings" });
   });
 
-  app.get("/api/history", async (req, res) => {
+  app.get("/api/history", async (_req, res) => {
     try {
       const closedTrades = await dbGetClosedTrades();
       const totalTrades = closedTrades.length;
-      const winningTrades = closedTrades.filter(t => t.pnl > 0).length;
+      const winningTrades = closedTrades.filter((t) => t.pnl > 0).length;
       const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
       const totalPnl = closedTrades.reduce((sum, t) => sum + t.pnl, 0);
       res.json({
         success: true,
         history: closedTrades,
-        metrics: { totalTrades, winRate: winRate.toFixed(1) + "%", totalPnl: totalPnl.toFixed(2) }
+        metrics: { totalTrades, winRate: winRate.toFixed(1) + "%", totalPnl: totalPnl.toFixed(2) },
       });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
   });
 
-  app.get("/api/technicals", (req, res) => {
+  app.get("/api/technicals", (_req, res) => {
     res.json({ success: true, technicals: engine.getTechnicals() });
   });
 
-  app.post("/api/test-telegram", requireAuth, async (req, res) => {
+  app.post("/api/test-telegram", requireAuth, async (_req, res) => {
     try {
       const result = await engine.telegram.sendTestNotification();
       if (result.success) res.json({ success: true, message: "Test notification sent successfully to Telegram!" });
@@ -145,7 +152,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/test-bybit", async (req, res) => {
+  app.get("/api/test-bybit", async (_req, res) => {
     const startTime = Date.now();
     try {
       const response = await bybit.getServerTime();
@@ -167,14 +174,14 @@ async function startServer() {
     }
   });
 
-  app.get("/api/watchlist", (req, res) => {
+  app.get("/api/watchlist", (_req, res) => {
     res.json({ success: true, watchlist: engine.watchlist });
   });
 
   app.post("/api/watchlist/add", (req, res) => {
     const { symbol } = req.body;
     if (symbol) {
-      engine.addSymbol(symbol.toUpperCase());
+      void engine.addSymbol(symbol.toUpperCase());
       res.json({ success: true, watchlist: engine.watchlist });
     } else res.status(400).json({ success: false, message: "Missing symbol" });
   });
@@ -187,24 +194,28 @@ async function startServer() {
     } else res.status(400).json({ success: false, message: "Missing symbol" });
   });
 
-  app.get("/api/positions", async (req, res) => {
+  app.get("/api/positions", async (_req, res) => {
     try {
       const response = await bybit.getPositionInfo({ category: "linear", settleCoin: "USDT" });
-      res.json({ success: true, positions: response.result?.list || [] });
+      if (response.retCode !== 0 || !Array.isArray(response.result?.list)) {
+        return res.status(502).json({ success: false, error: response.retMsg || "POSITION_STATE_UNAVAILABLE" });
+      }
+      res.json({ success: true, positions: response.result.list });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }
   });
 
-  app.get("/api/positions/active", async (req, res) => {
+  app.get("/api/positions/active", async (_req, res) => {
     try {
       const response = await bybit.getPositionInfo({ category: "linear", settleCoin: "USDT" });
-      const rawList = response.result?.list || [];
-      const activePositions = rawList
+      if (response.retCode !== 0 || !Array.isArray(response.result?.list)) {
+        return res.status(502).json({ success: false, error: response.retMsg || "POSITION_STATE_UNAVAILABLE" });
+      }
+      const activePositions = response.result.list
         .filter((pos: any) => parseFloat(pos.size || "0") > 0)
         .map((pos: any) => {
           const entryPrice = parseFloat(pos.avgPrice || "0");
-          const markPrice = parseFloat(pos.markPrice || "0");
           const size = parseFloat(pos.size || "0");
           const leverage = parseFloat(pos.leverage || "1");
           const unrealisedPnl = parseFloat(pos.unrealisedPnl || "0");
@@ -215,6 +226,7 @@ async function startServer() {
             symbol: pos.symbol,
             side: pos.side,
             size: pos.size,
+            positionIdx: pos.positionIdx,
             avgPrice: pos.avgPrice,
             markPrice: pos.markPrice,
             unrealisedPnl: pos.unrealisedPnl,
@@ -235,21 +247,9 @@ async function startServer() {
 
   app.post("/api/positions/close", requireAuth, async (req, res) => {
     try {
-      const { symbol, side, qty } = req.body;
+      const { symbol } = req.body;
       if (!symbol) return res.status(400).json({ success: false, message: "Missing symbol in request body" });
-      const targetSymbol = symbol.toUpperCase();
-      if (side && qty) {
-        const closeSide = side === "Buy" ? "Sell" : "Buy";
-        const orderRes = await bybit.submitOrder({
-          category: "linear", symbol: targetSymbol, side: closeSide, orderType: "Market", qty: qty.toString(), reduceOnly: true, timeInForce: "IOC", orderLinkId: `app-manual-${Date.now().toString(36)}`,
-        });
-        if (orderRes.retCode === 0) {
-          engine.emitter.log(`[Manual Close] Closed ${targetSymbol} position (${qty} contracts)`);
-          return res.json({ success: true, message: `Successfully closed ${targetSymbol} position`, orderId: orderRes.result?.orderId });
-        }
-        return res.status(400).json({ success: false, error: orderRes.retMsg || "Bybit rejected market close order", retCode: orderRes.retCode });
-      }
-      const result = await engine.manualClosePosition(targetSymbol);
+      const result = await engine.manualClosePosition(String(symbol).toUpperCase());
       if (result.success) res.json(result);
       else res.status(400).json(result);
     } catch (error: any) {
@@ -257,10 +257,10 @@ async function startServer() {
     }
   });
 
-  app.post("/api/positions/close-all", requireAuth, async (req, res) => {
+  app.post("/api/positions/close-all", requireAuth, async (_req, res) => {
     try {
       const result = await engine.closeAllPositions();
-      res.json(result);
+      res.status(result.success ? 200 : 400).json(result);
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }
@@ -269,9 +269,9 @@ async function startServer() {
   app.post("/api/test-order", requireAuth, async (req, res) => {
     try {
       const symbol = req.body?.symbol || "BTCUSDT";
-      const qty = req.body?.qty || "0.001";
+      const qty = req.body?.qty === undefined ? undefined : String(req.body.qty);
       const result = await engine.executeManualTestOrder(symbol, qty);
-      res.json(result);
+      res.status(result.success ? 200 : 400).json(result);
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }
@@ -355,7 +355,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/analytics/daily", async (req, res) => {
+  app.get("/api/analytics/daily", async (_req, res) => {
     try {
       const nowMs = Date.now();
       const { startMs: dayStartMs, endMs: dayEndMs } = getUtcTradingDayWindow(nowMs);
@@ -367,11 +367,15 @@ async function startServer() {
         bybit.getHistoricOrders({ category: "linear", startTime: dayStartMs, endTime: dayEndMs, limit: 100 }).catch(() => null),
       ]);
 
-      const openPositions = (posRes.result?.list || []).filter((p: any) => parseFloat(p.size || "0") > 0);
+      if (posRes.retCode !== 0 || !Array.isArray(posRes.result?.list)) throw new Error("POSITION_STATE_UNAVAILABLE");
+      if (pnlResponse.retCode !== 0 || !Array.isArray(pnlResponse.result?.list)) throw new Error("DAILY_PNL_UNAVAILABLE");
+      if (execResponse.retCode !== 0 || !Array.isArray(execResponse.result?.list)) throw new Error("Execution history unavailable");
+
+      const openPositions = posRes.result.list.filter((p: any) => parseFloat(p.size || "0") > 0);
       const activePositionsCount = openPositions.length;
-      const maxSlots = engine.settings.maxPositions || 3;
-      const rawClosedList = pnlResponse.result?.list || [];
-      const rawExecutions = execResponse.result?.list || [];
+      const maxSlots = engine.getRuntimeRiskStatus().maxPositions;
+      const rawClosedList = pnlResponse.result.list;
+      const rawExecutions = execResponse.result.list;
       const rawOrderHistory = orderHistoryResponse?.retCode === 0 ? (orderHistoryResponse.result?.list || []) : [];
       const engineHistory = engine.getHistory() || [];
 
@@ -437,8 +441,6 @@ async function startServer() {
         };
       });
 
-      // Opening executions have no closedSize (or zero closedSize). Count unique opening orders,
-      // not fills, so partial fills do not inflate Today's Total Opened.
       const openingExecutions = executionsToday.filter((exec: any) => Number(exec.closedSize || 0) <= 0);
       const openedTradeKeys = new Set<string>();
       for (const exec of openingExecutions) {
@@ -447,8 +449,6 @@ async function startServer() {
         openedTradeKeys.add(key);
       }
 
-      // Position openTime is a fallback for a still-open position if its opening execution is not
-      // present in the current execution page. Overnight positions are intentionally excluded.
       for (const pos of openPositions) {
         const openTime = normalizeTimestampMs(pos.openTime || pos.createdTime || pos.updatedTime);
         if (openTime < dayStartMs || openTime > dayEndMs) continue;
@@ -514,43 +514,44 @@ async function startServer() {
     }
   });
 
-  app.post("/api/bot/start", requireAuth, (req, res) => {
-    if (engine.start()) res.json({ success: true, message: "Bot started" });
-    else res.status(400).json({ success: false, message: "Bot is already running" });
+  app.post("/api/bot/start", requireAuth, (_req, res) => {
+    if (engine.start()) res.json({ success: true, message: "Bot started", runtime: engine.getRuntimeRiskStatus() });
+    else res.status(400).json({ success: false, message: "Bot is already running", runtime: engine.getRuntimeRiskStatus() });
   });
 
-  app.post("/api/bot/stop", requireAuth, (req, res) => {
-    if (engine.stop()) res.json({ success: true, message: "Bot stopped" });
-    else res.status(400).json({ success: false, message: "Bot is not running" });
+  app.post("/api/bot/stop", requireAuth, (_req, res) => {
+    if (engine.stop()) res.json({ success: true, message: "Bot stopped", runtime: engine.getRuntimeRiskStatus() });
+    else res.status(400).json({ success: false, message: "Bot is not running", runtime: engine.getRuntimeRiskStatus() });
   });
 
-  app.get('/api/bot/status', (req, res) => {
-    res.json({ success: true, running: engine.getIsRunning(), circuitBreaker: engine.circuitBreakerTriggered });
+  app.get("/api/bot/status", (_req, res) => {
+    const runtime = engine.getRuntimeRiskStatus();
+    res.json({ success: true, running: runtime.botRunning, circuitBreaker: runtime.breakerActive, runtime });
   });
 
-  app.post("/api/bot/reset-circuit-breaker", (req, res) => {
+  app.post("/api/bot/reset-circuit-breaker", requireAuth, (_req, res) => {
     engine.resetCircuitBreaker();
-    res.json({ success: true, message: 'Circuit breaker reset' });
+    res.json({ success: true, message: "Daily circuit breaker reset", runtime: engine.getRuntimeRiskStatus() });
   });
 
-  app.get("/api/scanner/state", (req, res) => {
+  app.get("/api/scanner/state", (_req, res) => {
     res.json({ success: true, state: engine.scanner.getState() });
   });
 
-  app.post("/api/scanner/scan-now", async (req, res) => {
+  app.post("/api/scanner/scan-now", async (_req, res) => {
     try {
       await engine.scanner.scanMarkets();
-      res.json({ success: true, state: engine.scanner.getState() });
+      res.json({ success: true, state: engine.scanner.getState(), runtime: engine.getRuntimeRiskStatus() });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }
   });
 
-  app.post("/api/scanner/refresh-markets", async (req, res) => {
+  app.post("/api/scanner/refresh-markets", async (_req, res) => {
     try {
       const symbols = await engine.scanner.discoverTopMarkets();
       await engine.scanner.scanMarkets();
-      res.json({ success: true, topSymbols: symbols, state: engine.scanner.getState() });
+      res.json({ success: true, topSymbols: symbols, state: engine.scanner.getState(), runtime: engine.getRuntimeRiskStatus() });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }
@@ -559,16 +560,20 @@ async function startServer() {
   app.post("/api/scanner/toggle-autotrade", (req, res) => {
     const { autoTrade } = req.body;
     engine.scanner.setAutoTrade(Boolean(autoTrade));
-    res.json({ success: true, autoTrade: engine.scanner.autoTrade });
+    engine.emitRuntimeStatus();
+    res.json({ success: true, autoTrade: engine.scanner.autoTrade, runtime: engine.getRuntimeRiskStatus() });
   });
 
   app.post("/api/scanner/max-concurrent", (req, res) => {
     const { maxConcurrent } = req.body;
-    engine.scanner.setMaxConcurrent(parseInt(maxConcurrent, 10) || 2);
-    res.json({ success: true, maxConcurrent: engine.scanner.maxConcurrent });
+    const requested = Number.parseInt(String(maxConcurrent), 10);
+    if (!Number.isFinite(requested)) return res.status(400).json({ success: false, error: "Invalid maxConcurrent" });
+    engine.scanner.setMaxConcurrent(requested);
+    engine.emitRuntimeStatus();
+    res.json({ success: true, maxConcurrent: engine.scanner.maxConcurrent, runtime: engine.getRuntimeRiskStatus() });
   });
 
-  app.get("/api/scanner/status", (req, res) => {
+  app.get("/api/scanner/status", (_req, res) => {
     try {
       res.json(scanner5m.getScheduleStatus());
     } catch (error: any) {
@@ -595,7 +600,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/scanner/signals/scan-now", async (req, res) => {
+  app.post("/api/scanner/signals/scan-now", async (_req, res) => {
     try {
       const results = await scanner5m.scanAllSymbols();
       res.json({
@@ -620,7 +625,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/scanner/pipeline/scan-now", async (req, res) => {
+  app.post("/api/scanner/pipeline/scan-now", async (_req, res) => {
     try {
       const state = await pipelineEngine.executePipelineScan();
       res.json({ success: true, pipeline: state });
@@ -631,11 +636,13 @@ async function startServer() {
 
   io.on("connection", (socket) => {
     console.log("Client connected:", socket.id);
-    socket.emit("bot-status", { running: engine.getIsRunning() });
+    const runtime = engine.getRuntimeRiskStatus();
+    socket.emit("runtime-status", runtime);
+    socket.emit("bot-status", { running: runtime.botRunning, circuitBreaker: runtime.breakerActive });
     socket.emit("price-update", engine.currentPrices);
     socket.emit("ticker:update", engine.currentPrices);
     socket.emit("watchlist-update", engine.watchlist);
-    socket.emit('settings-update', { ...engine.settings, demoTrading: process.env.BYBIT_DEMO === 'true' });
+    socket.emit("settings-update", { ...engine.settings, demoTrading: process.env.BYBIT_DEMO === "true" });
     socket.emit("technicals-update", engine.currentTechnicals);
     socket.emit("positions-update", engine.activePositions);
     socket.emit("position:update", engine.activePositions);
@@ -652,8 +659,18 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*", (req, res) => res.sendFile(path.join(distPath, "index.html")));
+    app.get("*", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
   }
+
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    engine.shutdown();
+    server.close(() => process.exit(0));
+  };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
 
   server.listen(PORT, "0.0.0.0", () => console.log(`Server running on http://localhost:${PORT}`));
 }
