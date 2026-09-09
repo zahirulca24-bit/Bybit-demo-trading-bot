@@ -120,7 +120,7 @@ export function ClosedTradesExitAuditTable({
                 <th className="py-3.5 px-4">Symbol & Side</th>
                 <th className="py-3.5 px-4">Entry Price</th>
                 <th className="py-3.5 px-4">Exit Price</th>
-                <th className="py-3.5 px-4">Realized PnL ($ & %)</th>
+                <th className="py-3.5 px-4">Realized PnL USDT</th><th className="py-3.5 px-4">Return on Notional %</th>
                 <th className="py-3.5 px-4">Exit Trigger Type</th>
                 <th className="py-3.5 px-4 text-right">Exit Timestamp</th>
               </tr>
@@ -128,14 +128,14 @@ export function ClosedTradesExitAuditTable({
             <tbody className="divide-y divide-neutral-800 font-mono">
               {filteredTrades.map((trade) => {
                 const isLong = trade.side?.toLowerCase() === "buy" || trade.side?.toLowerCase() === "long";
-                const isPositive = trade.pnl >= 0;
-                const formattedTime = new Date(trade.time).toLocaleTimeString(undefined, {
+                const isPositive = trade.pnl !== null && trade.pnl >= 0;
+                const formattedTime = trade.time === null ? "—" : new Date(trade.time).toLocaleTimeString(undefined, {
                   hour: "2-digit",
                   minute: "2-digit",
                   second: "2-digit",
                   hour12: false,
                 });
-                const formattedDate = new Date(trade.time).toLocaleDateString(undefined, {
+                const formattedDate = trade.time === null ? "—" : new Date(trade.time).toLocaleDateString(undefined, {
                   month: "short",
                   day: "numeric",
                 });
@@ -164,27 +164,21 @@ export function ClosedTradesExitAuditTable({
 
                     {/* Entry Price */}
                     <td className="py-3.5 px-4 text-neutral-300 font-semibold">
-                      ${trade.entryPrice >= 1000 
-                        ? trade.entryPrice.toLocaleString(undefined, { minimumFractionDigits: 2 }) 
-                        : trade.entryPrice.toFixed(trade.entryPrice < 1 ? 4 : 2)}
+                      {trade.entryPrice === null ? "—" : `$${trade.entryPrice >= 1000 ? trade.entryPrice.toLocaleString(undefined, { minimumFractionDigits: 2 }) : trade.entryPrice.toFixed(trade.entryPrice < 1 ? 4 : 2)}`}
                     </td>
 
                     {/* Exit Price */}
                     <td className="py-3.5 px-4 text-white font-semibold">
-                      ${trade.exitPrice >= 1000 
-                        ? trade.exitPrice.toLocaleString(undefined, { minimumFractionDigits: 2 }) 
-                        : trade.exitPrice.toFixed(trade.exitPrice < 1 ? 4 : 2)}
+                      {trade.exitPrice === null ? "—" : `$${trade.exitPrice >= 1000 ? trade.exitPrice.toLocaleString(undefined, { minimumFractionDigits: 2 }) : trade.exitPrice.toFixed(trade.exitPrice < 1 ? 4 : 2)}`}
                     </td>
 
                     {/* Realized PnL ($ and %) */}
                     <td className="py-3.5 px-4">
                       <div className={`font-bold text-sm ${isPositive ? "text-emerald-400" : "text-rose-400"}`}>
-                        {isPositive ? "+" : ""}${trade.pnl.toFixed(2)} USDT
-                      </div>
-                      <div className={`text-[11px] ${isPositive ? "text-emerald-500" : "text-rose-500"}`}>
-                        {isPositive ? "+" : ""}{trade.pnlPercent.toFixed(2)}%
+                        {trade.pnl === null ? "—" : `${trade.pnl >= 0 ? "+" : ""}$${trade.pnl.toFixed(2)} USDT`}
                       </div>
                     </td>
+                    <td className="py-3.5 px-4 text-neutral-300">{trade.returnOnNotionalPercent == null ? "—" : `${trade.returnOnNotionalPercent >= 0 ? "+" : ""}${trade.returnOnNotionalPercent.toFixed(2)}%`}</td>
 
                     {/* Exit Trigger Type Badge */}
                     <td className="py-3.5 px-4">

@@ -3,7 +3,7 @@ import { Server as SocketIOServer } from "socket.io";
 import { TelegramNotifier } from "./TelegramNotifier";
 import { BybitWebSocketManager, KlineEventPayload, TickerEventPayload } from "./BybitWebSocketManager";
 import { MarketScanner } from "./MarketScanner";
-import { dbRecordReportEvent, dbRecordTrade } from "../db";
+import { dbRecordReportEvent, dbRecordTrade, dbUpdateOpenTradeFill } from "../db";
 import { ATR } from "technicalindicators";
 import { getUtcDayStartMs, normalizeTimestampMs } from "../utils/utcTradingDay";
 import { classifyClosedTradeExit } from "../utils/exitClassification";
@@ -110,6 +110,8 @@ type PositionRiskState = {
   initialStopLoss?: number;
   initialRiskPercent?: number;
   atrPercent?: number;
+  openingOrderId?: string;
+  openingOrderLinkId?: string;
 };
 
 export class TradingEngine {
@@ -398,7 +400,7 @@ export class TradingEngine {
       const pnl = Number(item.closedPnl || 0);
       const entryPrice = Number(item.avgEntryPrice || 0);
       const exitPrice = Number(item.avgExitPrice || 0);
-      const qty = Number(item.qty || 0);
+      const qty = Number(item.closedSize || item.qty);
       const entryNotional = entryPrice * qty;
       const pnlPercent = entryNotional > 0 ? (pnl / entryNotional) * 100 : 0;
       const time = this.extractClosedTime(item) || Date.now();
@@ -422,26 +424,27 @@ export class TradingEngine {
       this.tradeHistory.unshift(trade);
       this.emitter.tradeUpdate(trade);
       this.telegram.sendTradeClosed(symbol, exitPrice, classified.label, pnl, pnlPercent);
-      dbRecordTrade({
-        symbol,
-        side,
-        entryPrice,
-        exitPrice,
-        status: "CLOSED",
-        exitReason: classified.label,
-        exitAudit: classified,
-        source: "external",
-        closingOrderId: classified.matchedOrderId || item.orderId || null,
-        closingOrderLinkId: classified.matchedOrderLinkId || item.orderLinkId || null,
-        realizedPnl: pnl,
-        closedAt: time,
-        sizeNotional: entryNotional,
-        marginUsed: entryNotional / (this.settings.leverage || 10),
-        leverage: this.settings.leverage || 10,
-      });
+      const openingOrderId = this.positionState[symbol]?.openingOrderId || null;
+      dbRecordTrade({ symbol, side: item.side === "Buy" || item.side === "Sell" ? item.side : side, entryPrice: Number.isFinite(entryPrice) ? entryPrice : null, exitPrice: Number.isFinite(exitPrice) ? exitPrice : null, actualQty: Number.isFinite(qty) ? qty : null, status: "CLOSED", exitReason: classified.label, exitAudit: classified, source: openingOrderId ? undefined : "external", openingOrderId, closingOrderId: item.orderId || null, closingOrderLinkId: item.orderLinkId || null, realizedPnl: Number.isFinite(pnl) ? pnl : null, closedAt: time, sizeNotional: entryNotional > 0 ? entryNotional : null, marginUsed: null, leverage: Number(item.leverage) > 0 ? Number(item.leverage) : null });
     } catch (err: any) {
       this.emitter.log(`[${symbol}] Closed-PnL reconciliation warning: ${err.message}`);
     }
+  }
+
+  private async reconcileOpenFill(openingOrderId: string) {
+    for (const delay of [250, 600, 1200]) {
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      try {
+        const res: any = await (this.bybit as any).getExecutionList({ category: "linear", orderId: openingOrderId, limit: 100 });
+        const fills = res?.retCode === 0 ? (res.result?.list || []).filter((x: any) => Number(x.execQty || 0) > 0) : [];
+        if (!fills.length) continue;
+        const actualQty = fills.reduce((sum: number, x: any) => sum + Number(x.execQty || 0), 0);
+        const actualNotional = fills.reduce((sum: number, x: any) => sum + Number(x.execQty || 0) * Number(x.execPrice || 0), 0);
+        if (!(actualQty > 0 && actualNotional > 0)) continue;
+        await dbUpdateOpenTradeFill(openingOrderId, actualQty, actualNotional / actualQty, actualNotional); return;
+      } catch {}
+    }
+    this.emitter.log(`[Trade Metadata] Fill facts for ${openingOrderId} unavailable; quantity/notional remain unknown.`);
   }
 
   private async validatePreOrder(symbol: string, side: "Buy" | "Sell", notionalSizeUsdt: number): Promise<{ valid: boolean; qty: string; price: number; reason?: string }> {
@@ -516,19 +519,13 @@ export class TradingEngine {
 
       this.emitter.log(`⚡ [Scanner Execution] ${side === "Buy" ? "LONG" : "SHORT"} ${targetSymbol} | Margin cap $${this.settings.positionMarginUsdt} | Used ~$${actualMargin.toFixed(2)} | Notional ~$${actualNotional.toFixed(2)} | TP ${takeProfit} | SL ${stopLoss}`);
       this.emitter.log(`[Trade Quality] ${targetSymbol} RSI=${rsi.toFixed(1)} ATR%=${stopPlan.atrPercent.toFixed(3)} OI=${quality?.oiExpansionPercent?.toFixed(3) ?? "N/A"}% Spread=${quality?.spreadPercent?.toFixed(3) ?? "N/A"}% Trend=${quality?.trendState ?? "N/A"} EMA9=${quality?.ema9?.toFixed(6) ?? "N/A"} EMA21=${quality?.ema21?.toFixed(6) ?? "N/A"} Timing=${quality?.emaTimingScore?.toFixed(2) ?? "N/A"}/2 Cross=${quality?.freshCross ?? "none"}@${quality?.crossoverAgeCandles ?? "N/A"} Setup=${quality?.finalSetupScore?.toFixed(2) ?? "N/A"} BreakoutBonus=${Boolean(quality?.breakoutBonus)} Candle=${quality?.entryCandleDirection ?? "N/A"} SL=${stopPlan.stopDistancePercent.toFixed(3)}% (${stopPlan.stopDistanceAtrMultiple.toFixed(2)} ATR) Reason=${stopPlan.reason}`);
+      const openingOrderLinkId = `app-scan-${Date.now().toString(36)}`;
       const orderRes = await this.bybit.submitOrder({
-        category: "linear",
-        symbol: targetSymbol,
-        side,
-        orderType: "Market",
-        qty: pre.qty,
-        timeInForce: "IOC",
-        takeProfit,
-        stopLoss,
+        category: "linear", symbol: targetSymbol, side, orderType: "Market", qty: pre.qty, timeInForce: "IOC", takeProfit, stopLoss, orderLinkId: openingOrderLinkId,
       });
       if (orderRes.retCode !== 0) return { success: false, message: orderRes.retMsg || "Bybit rejected scanner order" };
 
-      const orderId = orderRes.result?.orderId || `scan-${Date.now()}`;
+      const orderId = orderRes.result?.orderId || null;
       const position = { symbol: targetSymbol, side, size: pre.qty, avgPrice: String(currentPrice), markPrice: String(currentPrice) };
       this.activePositions.push(position);
       this.positionState[targetSymbol] = {
@@ -537,19 +534,22 @@ export class TradingEngine {
         initialStopLoss: Number(stopLoss),
         initialRiskPercent: stopPlan.stopDistancePercent,
         atrPercent: stopPlan.atrPercent,
+        openingOrderId: orderId || undefined, openingOrderLinkId,
       };
       this.emitter.updatePositions(this.activePositions);
       this.telegram.sendTradeExecution(targetSymbol, side === "Buy" ? "Long (Strict Scanner)" : "Short (Strict Scanner)", currentPrice, pre.qty, takeProfit, stopLoss);
       dbRecordTrade({
         symbol: targetSymbol,
         side,
-        entryPrice: currentPrice,
+        entryPrice: null,
         status: "OPEN",
         source: "auto",
-        openingOrderId: orderRes.result?.orderId || orderId,
-        openingOrderLinkId: null,
-        sizeNotional: actualNotional,
-        marginUsed: actualMargin,
+        openingOrderId: orderId,
+        openingOrderLinkId,
+        submittedQty: pre.qty,
+        actualQty: null,
+        sizeNotional: null,
+        marginUsed: null,
         leverage: this.settings.leverage,
         entryDiagnostics: {
           rsi,
@@ -575,10 +575,13 @@ export class TradingEngine {
           slDistanceAtrMultiple: stopPlan.stopDistanceAtrMultiple,
           slReason: stopPlan.reason,
           configuredMarginCapUsdt: this.settings.positionMarginUsdt,
-          actualMarginUsedUsdt: actualMargin,
-          actualNotionalUsdt: actualNotional,
+          actualMarginUsedUsdt: null,
+          actualNotionalUsdt: null,
+          plannedMarginUsdt: actualMargin,
+          plannedNotionalUsdt: actualNotional,
         },
       });
+      if (orderId) void this.reconcileOpenFill(orderId);
       if (!this.watchlist.includes(targetSymbol)) void this.addSymbol(targetSymbol);
       setTimeout(() => void this.syncPositions(), 800);
       return { success: true, message: `${side === "Buy" ? "Long" : "Short"} entry placed for ${targetSymbol}`, orderId };
@@ -786,16 +789,15 @@ export class TradingEngine {
     const { takeProfit, stopLoss } = this.riskManager.calculateBrackets(pre.price, this.settings.tpPercent, this.settings.slPercent, "Buy");
     try {
       await this.ensureLeverage(target);
-      const result = await this.bybit.submitOrder({
-        category: "linear", symbol: target, side: "Buy", orderType: "Market", qty,
-        timeInForce: "IOC", takeProfit, stopLoss,
-      });
+      const openingOrderLinkId = `app-test-${Date.now().toString(36)}`;
+      const result = await this.bybit.submitOrder({ category: "linear", symbol: target, side: "Buy", orderType: "Market", qty, timeInForce: "IOC", takeProfit, stopLoss, orderLinkId: openingOrderLinkId });
       if (result.retCode !== 0) return { success: false, message: result.retMsg || "Bybit rejected test order" };
-      const orderId = result.result?.orderId || `test-${Date.now()}`;
+      const orderId = result.result?.orderId || null;
       this.activePositions.push({ symbol: target, side: "Buy", size: qty, avgPrice: String(pre.price), markPrice: String(pre.price) });
-      this.positionState[target] = { peakPrice: pre.price, breakEvenSet: false };
+      this.positionState[target] = { peakPrice: pre.price, breakEvenSet: false, openingOrderId: orderId || undefined, openingOrderLinkId };
       this.emitter.updatePositions(this.activePositions);
-      dbRecordTrade({ symbol: target, side: "Buy", entryPrice: pre.price, status: "OPEN", source: "manual", openingOrderId: result.result?.orderId || orderId, openingOrderLinkId: null, sizeNotional: notional, marginUsed: this.settings.positionMarginUsdt, leverage: this.settings.leverage });
+      dbRecordTrade({ symbol: target, side: "Buy", entryPrice: null, status: "OPEN", source: "manual", openingOrderId: orderId, openingOrderLinkId, submittedQty: qty, actualQty: null, sizeNotional: null, marginUsed: null, leverage: this.settings.leverage });
+      if (orderId) void this.reconcileOpenFill(orderId);
       setTimeout(() => void this.syncPositions(), 800);
       return { success: true, message: `Test long placed for ${target}`, orderId };
     } catch (err: any) {

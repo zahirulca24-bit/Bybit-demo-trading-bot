@@ -42,15 +42,23 @@ export interface Position {
 export interface TradeHistory {
   id: string;
   symbol: string;
-  side: "Buy" | "Sell";
-  entryPrice: number;
-  exitPrice: number;
-  size: number;
-  qty?: string | number;
-  pnl: number;
-  pnlPercent: number;
+  side: "Buy" | "Sell" | null;
+  entryPrice: number | null;
+  exitPrice: number | null;
+  size: number | null;
+  qty?: number | null;
+  filledQty?: number | null;
+  pnl: number | null;
+  realizedPnlUsdt: number | null;
+  priceMovePercent: number | null;
+  returnOnNotionalPercent: number | null;
+  roePercent: number | null;
+  pnlPercent?: number | null;
   reason: string;
-  time: number;
+  time: number | null;
+  orderId?: string | null;
+  orderLinkId?: string | null;
+  outcome?: "WIN" | "LOSS" | "ZERO" | "UNKNOWN";
   type?: "buy" | "sell";
 }
 
@@ -141,19 +149,23 @@ export interface Scanner5mResult {
 export interface ClosedTradeAuditItem {
   id: string;
   symbol: string;
-  side: "LONG" | "SHORT";
-  entryPrice: number;
-  exitPrice: number;
-  qty: string;
-  pnl: number;
-  pnlPercent: number;
+  side: "Buy" | "Sell" | null;
+  entryPrice: number | null;
+  exitPrice: number | null;
+  qty: number | null;
+  pnl: number | null;
+  pnlPercent: number | null;
+  priceMovePercent?: number | null;
+  returnOnNotionalPercent?: number | null;
+  roePercent?: number | null;
+  outcome?: "WIN" | "LOSS" | "ZERO" | "UNKNOWN";
   exitTrigger: string;
   classifiedBy?: string;
   matchedOrderId?: string;
   matchedOrderLinkId?: string;
   rawStopOrderType?: string;
   rawCreateType?: string;
-  time: number;
+  time: number | null;
   openedTime?: number;
   slDiagnosticReason?: string;
 }
@@ -175,6 +187,7 @@ export interface DailyTradeAnalytics {
   todayClosedCount: number;
   winningTradesCount: number;
   losingTradesCount: number;
+  zeroOrUnknownCount: number;
   activePositionsCount: number;
   maxSlots: number;
   tpHitCount: number;
@@ -183,9 +196,9 @@ export interface DailyTradeAnalytics {
   manualCloseCount: number;
   otherExitCount: number;
   breakEvenCount: number;
-  realizedPnlToday: number;
-  unrealizedPnlToday: number;
-  netDailyPnl: number;
+  realizedPnlToday: number | null;
+  unrealizedPnlToday: number | null;
+  netDailyPnl: number | null;
   slAudit: SlAuditSummary;
   closedTrades: ClosedTradeAuditItem[];
 }

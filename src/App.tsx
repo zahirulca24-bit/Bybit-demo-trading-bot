@@ -137,20 +137,7 @@ export default function App() {
       if (settingsRes.success) setSettings(settingsRes.settings);
 
       if (summaryRes.success && Array.isArray(summaryRes.history)) {
-        const normalizedHistory: TradeHistory[] = summaryRes.history.map((trade: any) => ({
-          id: String(trade.id ?? `${trade.symbol}-${trade.time}`),
-          symbol: String(trade.symbol ?? ""),
-          side: trade.side === "Sell" ? "Sell" : "Buy",
-          entryPrice: Number(trade.entryPrice ?? Number.NaN),
-          exitPrice: Number(trade.exitPrice ?? Number.NaN),
-          size: Number(trade.qty ?? Number.NaN),
-          qty: trade.qty ?? "",
-          pnl: Number(trade.pnl ?? Number.NaN),
-          pnlPercent: Number(trade.pnlPercent ?? Number.NaN),
-          reason: String(trade.reason ?? "Other / Unknown"),
-          time: Number(trade.time ?? Number.NaN),
-        }));
-        setHistory(normalizedHistory);
+        setHistory(summaryRes.history as TradeHistory[]);
       }
 
       if (techRes.success) setTechnicals(techRes.technicals);
