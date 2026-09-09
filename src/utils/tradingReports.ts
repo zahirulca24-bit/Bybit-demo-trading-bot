@@ -1,5 +1,9 @@
 export type ReportWindow = { startMs: number; endMs: number };
 export type ReportExitLabel = "TP" | "SL" | "Trailing" | "Manual" | "Other / Unknown";
+export type TradeSource = "auto" | "manual" | "external" | "unknown";
+export type ReconciliationStatus = "PASS" | "PARTIAL" | "FAIL" | "UNAVAILABLE";
+
+const BDT_OFFSET_MS = 6 * 60 * 60 * 1000;
 
 export function previousFullUtcHour(nowMs: number = Date.now()): ReportWindow {
   const currentHourStart = Date.UTC(
@@ -18,10 +22,44 @@ export function previousUtcDay(nowMs: number = Date.now()): ReportWindow {
   return { startMs: currentDayStart - 24 * 60 * 60 * 1000, endMs: currentDayStart };
 }
 
+/** Asia/Dhaka has a fixed UTC+06:00 offset for the reporting dates used by this application. */
+export function currentBangladeshDayStartMs(nowMs: number = Date.now()): number {
+  const shifted = new Date(nowMs + BDT_OFFSET_MS);
+  const shiftedMidnightUtc = Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate(), 0, 0, 0, 0);
+  return shiftedMidnightUtc - BDT_OFFSET_MS;
+}
+
+export function previousBangladeshDay(nowMs: number = Date.now()): ReportWindow {
+  const currentStart = currentBangladeshDayStartMs(nowMs);
+  return { startMs: currentStart - 24 * 60 * 60 * 1000, endMs: currentStart };
+}
+
+export function currentBangladeshDay(nowMs: number = Date.now()): ReportWindow {
+  const startMs = currentBangladeshDayStartMs(nowMs);
+  return { startMs, endMs: startMs + 24 * 60 * 60 * 1000 };
+}
+
+export function bangladeshDateForTimestamp(timestampMs: number): string {
+  return new Date(timestampMs + BDT_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+export function formatBangladeshDay(window: ReportWindow): string {
+  return bangladeshDateForTimestamp(window.startMs);
+}
+
+export function bangladeshDailyDeliveryKey(window: ReportWindow): string {
+  return `telegram:daily:bdt:${formatBangladeshDay(window)}`;
+}
+
+export function bangladeshBoundaryReady(nowMs: number, delayMs: number = 5_000): boolean {
+  return nowMs - currentBangladeshDayStartMs(nowMs) >= delayMs;
+}
+
 export function hourlyDeliveryKey(window: ReportWindow): string {
   return `telegram:hourly:${new Date(window.startMs).toISOString().slice(0, 13)}`;
 }
 
+/** Legacy UTC daily key retained only for compatibility with old report records/tests. */
 export function dailyDeliveryKey(window: ReportWindow): string {
   return `telegram:daily:${new Date(window.startMs).toISOString().slice(0, 10)}`;
 }
@@ -209,6 +247,7 @@ export async function sendWithRetry(
 }
 
 export function finiteOrNull(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
 }
@@ -222,7 +261,6 @@ export function formatMoney(value: number | null | undefined): string {
 export function formatMetric(value: number | null | undefined, decimals: number = 2): string {
   return Number.isFinite(value) ? Number(value).toFixed(decimals) : "Unavailable";
 }
-
 
 export function splitTelegramMessage(message: string, maxChars: number = 3800): string[] {
   if (message.length <= maxChars) return [message];
@@ -247,4 +285,155 @@ export function splitTelegramMessage(message: string, maxChars: number = 3800): 
   }
   if (current) parts.push(current);
   return parts.length ? parts : [message];
+}
+
+export function canonicalOpeningIdentity(item: any): string | null {
+  const id = item?.orderId || item?.orderLinkId;
+  return id ? String(id) : null;
+}
+
+export function canonicalClosingIdentity(item: any): string | null {
+  const id = item?.orderId || item?.orderLinkId;
+  return id ? String(id) : null;
+}
+
+export function dedupeOpeningExecutions(executions: any[], window: ReportWindow): any[] {
+  const byIdentity = new Map<string, any>();
+  for (const item of executions) {
+    const t = Number(item.__timestampMs ?? item.execTime ?? item.createdTime ?? 0);
+    if (!(t >= window.startMs && t < window.endMs)) continue;
+    const closedSize = Number(item.closedSize || 0);
+    const execQty = Number(item.execQty || 0);
+    if (!(execQty > 0) || closedSize > 0) continue;
+    const identity = canonicalOpeningIdentity(item) || String(item.execId || `${item.symbol}:${t}:${item.side}`);
+    if (!byIdentity.has(identity)) byIdentity.set(identity, item);
+  }
+  return [...byIdentity.values()];
+}
+
+/**
+ * Closed PnL can contain more than one row for one closing order. Rows with the same
+ * closing identity are aggregated so partial fills of one close order count once while PnL is preserved.
+ * Distinct close-order identities are intentionally not collapsed because doing so without a lifecycle id
+ * would fabricate certainty about partial-position closes.
+ */
+export function aggregateClosedPnlByIdentity(rows: any[], getTimestampMs: (row: any) => number): any[] {
+  const grouped = new Map<string, any>();
+  rows.forEach((row, index) => {
+    const timestamp = getTimestampMs(row);
+    const identity = canonicalClosingIdentity(row) || `unidentified:${row.symbol || "?"}:${timestamp}:${row.side || "?"}:${index}`;
+    const current = grouped.get(identity);
+    if (!current) {
+      grouped.set(identity, { ...row, closedPnl: Number(row.closedPnl || 0), __timestampMs: timestamp });
+      return;
+    }
+    current.closedPnl = Number(current.closedPnl || 0) + Number(row.closedPnl || 0);
+    if (timestamp > Number(current.__timestampMs || 0)) {
+      current.__timestampMs = timestamp;
+      current.updatedTime = row.updatedTime || current.updatedTime;
+    }
+  });
+  return [...grouped.values()];
+}
+
+export interface PersistedTradeForReport {
+  id: string;
+  source?: TradeSource | string | null;
+  openedAt: number | null;
+  closedAt: number | null;
+  openingOrderId?: string | null;
+  openingOrderLinkId?: string | null;
+  closingOrderId?: string | null;
+  closingOrderLinkId?: string | null;
+}
+
+export function reconcileTradeLifecycles(
+  rows: PersistedTradeForReport[],
+  window: ReportWindow,
+  exchangeOpenedCount: number | null,
+  exchangeClosedCount: number | null,
+) {
+  const usable = rows.filter((row) => row.openedAt !== null && row.openedAt !== undefined && Number.isFinite(Number(row.openedAt)));
+  const dayStartOpenRows = usable.filter((row) => Number(row.openedAt) < window.startMs && (!row.closedAt || Number(row.closedAt) >= window.startMs));
+  const openedRows = usable.filter((row) => Number(row.openedAt) >= window.startMs && Number(row.openedAt) < window.endMs);
+  const closedRows = usable.filter((row) => row.closedAt && Number(row.closedAt) >= window.startMs && Number(row.closedAt) < window.endMs);
+  const dayEndOpenRows = usable.filter((row) => Number(row.openedAt) < window.endMs && (!row.closedAt || Number(row.closedAt) >= window.endMs));
+
+  const dayStartOpen = dayStartOpenRows.length;
+  const openedDuringWindow = openedRows.length;
+  const closedDuringWindow = closedRows.length;
+  const dayEndOpen = dayEndOpenRows.length;
+  const delta = dayStartOpen + openedDuringWindow - closedDuringWindow - dayEndOpen;
+
+  const openingIdentityCovered = openedRows.filter((row) => Boolean(row.openingOrderId || row.openingOrderLinkId)).length;
+  const closingIdentityCovered = closedRows.filter((row) => Boolean(row.closingOrderId || row.closingOrderLinkId)).length;
+  const identityComplete = openingIdentityCovered === openedRows.length && closingIdentityCovered === closedRows.length;
+  const exchangeComparable = exchangeOpenedCount !== null && exchangeClosedCount !== null;
+  const exchangeMatches = !exchangeComparable || (exchangeOpenedCount === openedDuringWindow && exchangeClosedCount === closedDuringWindow);
+
+  let status: ReconciliationStatus;
+  let reason: string;
+  if (delta !== 0) {
+    status = "FAIL";
+    reason = `lifecycle conservation delta ${delta}`;
+  } else if (!identityComplete || !exchangeComparable || !exchangeMatches) {
+    status = "PARTIAL";
+    const reasons: string[] = [];
+    if (!identityComplete) reasons.push("historical exchange identity coverage incomplete");
+    if (!exchangeComparable) reasons.push("exchange history unavailable");
+    else if (!exchangeMatches) reasons.push("exchange opening/closing identities do not fully match persisted lifecycle rows");
+    reason = reasons.join("; ");
+  } else {
+    status = "PASS";
+    reason = "canonical lifecycle conservation and exchange identity counts agree";
+  }
+
+  return {
+    status,
+    reason,
+    dayStartOpen,
+    openedDuringWindow,
+    closedDuringWindow,
+    dayEndOpen,
+    delta,
+    openingIdentityCovered,
+    closingIdentityCovered,
+    openedRows,
+    closedRows,
+  };
+}
+
+export function normalizeTradeSource(value: unknown): TradeSource {
+  const source = String(value || "unknown").toLowerCase();
+  if (source === "auto" || source === "manual" || source === "external") return source;
+  return "unknown";
+}
+
+export function summarizeTradeSourceCoverage(rows: any[], expectedOpenCount: number | null) {
+  const opened = rows;
+  const counts = { auto: 0, manual: 0, external: 0, unknown: 0 };
+  for (const row of opened) counts[normalizeTradeSource(row.source)]++;
+  const expected = expectedOpenCount === null ? opened.length : Math.max(expectedOpenCount, opened.length);
+  const known = counts.auto + counts.manual + counts.external;
+  const full = expected === 0 ? true : known === expected && counts.unknown === 0 && opened.length === expected;
+  const coverage = expected === 0 ? 1 : Math.min(1, known / expected);
+  return { ...counts, known, expected, coverage, full };
+}
+
+export function hasUsableEmaTimingMetadata(trade: any): boolean {
+  const d = trade?.entryDiagnostics;
+  if (!d) return false;
+  const score = Number(d.emaTimingScore);
+  const state = String(d.emaTimingState || "");
+  return Number.isFinite(score) && ["Bullish", "Bearish", "Neutral"].includes(state);
+}
+
+export function coverageForWindow(coverageStart: unknown, window: ReportWindow): "FULL" | "PARTIAL" | "UNAVAILABLE" {
+  const start = Number(coverageStart);
+  if (!Number.isFinite(start) || start <= 0) return "UNAVAILABLE";
+  return start <= window.startMs ? "FULL" : "PARTIAL";
+}
+
+export function snapshotReliability(boundaryMs: number, capturedAtMs: number, maxDriftMs: number = 60_000): boolean {
+  return capturedAtMs >= boundaryMs && capturedAtMs - boundaryMs <= maxDriftMs;
 }

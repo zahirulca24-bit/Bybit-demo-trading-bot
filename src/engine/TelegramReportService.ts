@@ -1,27 +1,42 @@
 import { RestClientV5 } from "bybit-api";
 import { TelegramNotifier } from "./TelegramNotifier";
-import { dbClaimReportDelivery, dbCompleteReportDelivery, dbGetReportTrades, dbGetSettings, dbSaveSettings } from "../db";
+import {
+  dbClaimReportDelivery,
+  dbCompleteReportDelivery,
+  dbGetAccountSnapshot,
+  dbGetReportEvents,
+  dbGetReportTrades,
+  dbGetSettings,
+  dbSaveAccountSnapshot,
+  dbSaveSettings,
+} from "../db";
 import { classifyClosedTradeExit } from "../utils/exitClassification";
 import { normalizeTimestampMs } from "../utils/utcTradingDay";
 import {
-  CursorPage,
-  ClosedTradeLike,
-  dailyDeliveryKey,
+  aggregateClosedPnlByIdentity,
+  bangladeshBoundaryReady,
+  bangladeshDailyDeliveryKey,
+  coverageForWindow,
+  currentBangladeshDay,
+  dedupeOpeningExecutions,
   finiteOrNull,
-  formatMetric,
+  formatBangladeshDay,
   formatMoney,
-  formatUtcDay,
   formatUtcHourWindow,
+  hasUsableEmaTimingMetadata,
   hourlyDeliveryKey,
   maxConsecutiveLosses,
   paginateUntilBoundary,
+  previousBangladeshDay,
   previousFullUtcHour,
-  previousUtcDay,
   qualityBreakdown,
+  reconcileTradeLifecycles,
   ReportWindow,
   safeAverage,
-  summarizeClosedTrades,
+  snapshotReliability,
   splitTelegramMessage,
+  summarizeClosedTrades,
+  summarizeTradeSourceCoverage,
 } from "../utils/tradingReports";
 
 type ReportEngine = {
@@ -39,7 +54,6 @@ type AccountSnapshot = {
   equity: number | null;
   available: number | null;
   capturedAt: number;
-  reliableBoundary?: boolean;
 };
 
 type RuntimeMetrics = {
@@ -53,8 +67,61 @@ type RuntimeMetrics = {
   breakerTriggered: boolean;
 };
 
+type DailyReportData = {
+  date: string;
+  partialErrors: SourceError[];
+  account: {
+    startingWallet: number | null;
+    startingEquity: number | null;
+    endingWallet: number | null;
+    endingEquity: number | null;
+    currentUnrealized: number | null;
+    netAccountChange: number | null;
+  };
+  performance: ReturnType<typeof summarizeClosedTrades> | null;
+  bestPnl: number | null;
+  worstPnl: number | null;
+  averageDurationMs: number | null;
+  reconciliation: ReturnType<typeof reconcileTradeLifecycles> | null;
+  exchangeOpenedCount: number | null;
+  exchangeClosedCount: number | null;
+  sourceAttribution: ReturnType<typeof summarizeTradeSourceCoverage> | null;
+  sourceUnmatchedExchange: number;
+  ema: {
+    denominator: number;
+    covered: number;
+    quality: ReturnType<typeof qualityBreakdown> | null;
+    averageScore: number | null;
+  };
+  exits: ReturnType<typeof summarizeClosedTrades>["exits"] | null;
+  longStats: ReturnType<typeof summarizeClosedTrades> | null;
+  shortStats: ReturnType<typeof summarizeClosedTrades> | null;
+  risk: {
+    runtimeCoverage: "FULL" | "PARTIAL" | "UNAVAILABLE";
+    maxPositionsObserved: number | null;
+    breakerStatus: "YES" | "NO" | "PARTIAL" | "UNAVAILABLE";
+    lossPauseCount: number | null;
+    lossPauseCoverage: "FULL" | "PARTIAL" | "UNAVAILABLE";
+    maxLossStreak: number | null;
+    slRate: number | null;
+    avgSlDistance: number | null;
+    slCoverage: number;
+    reducedNotionalCount: number | null;
+    reducedNotionalCoverage: number;
+  };
+  scanner: {
+    runtimeCoverage: "FULL" | "PARTIAL" | "UNAVAILABLE";
+    scannedCandidates: number | null;
+    sixGatePasses: number | null;
+    breakoutBonusTrades: number | null;
+    breakoutCoverage: number;
+  };
+};
+
 const TICK_MS = 15_000;
 const DAILY_REPORT_DELAY_MS = 5_000;
+const REPORTING_TIMEZONE = "Asia/Dhaka";
+const LOSS_PAUSE_COVERAGE_KEY = "reporting:lossPauseEventCoverageStart";
 
 function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -81,6 +148,11 @@ function positionLine(position: any): string {
   return `• ${symbol} ${side} | Entry ${price(entry)} | Mark ${price(mark)} | uPnL ${formatMoney(pnl)} | SL ${price(sl)} | TP ${price(tp)}`;
 }
 
+function observedMetric(value: number | null, coverage: "FULL" | "PARTIAL" | "UNAVAILABLE"): string {
+  if (value === null || coverage === "UNAVAILABLE") return "Unavailable";
+  return coverage === "FULL" ? String(value) : `${value} (partial coverage)`;
+}
+
 export class TelegramReportService {
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
@@ -95,7 +167,7 @@ export class TelegramReportService {
     if (this.timer) return;
     void this.tick(true);
     this.timer = setInterval(() => void this.tick(false), TICK_MS);
-    console.log("[TelegramReports] Scheduler started: previous full UTC hour + previous UTC day.");
+    console.log("[TelegramReports] Scheduler started: UTC hourly + completed Asia/Dhaka daily reports.");
   }
 
   public stop() {
@@ -108,15 +180,11 @@ export class TelegramReportService {
     this.ticking = true;
     try {
       const now = Date.now();
+      await this.ensureCoverageMarkers(now);
       await this.observeRuntime(now);
-      await this.captureBoundarySnapshot(now);
+      await this.captureBangladeshBoundarySnapshot(now);
       await this.ensureHourlyReport(now, isStartup);
-      const currentDayStart = Date.UTC(
-        new Date(now).getUTCFullYear(),
-        new Date(now).getUTCMonth(),
-        new Date(now).getUTCDate(),
-      );
-      if (now - currentDayStart >= DAILY_REPORT_DELAY_MS) await this.ensureDailyReport(now, isStartup);
+      if (bangladeshBoundaryReady(now, DAILY_REPORT_DELAY_MS)) await this.ensureDailyReport(now, isStartup);
     } catch (error) {
       console.error(`[TelegramReports] scheduler warning: ${errorText(error)}`);
     } finally {
@@ -124,17 +192,17 @@ export class TelegramReportService {
     }
   }
 
+  private async ensureCoverageMarkers(now: number) {
+    const existing = await dbGetSettings(LOSS_PAUSE_COVERAGE_KEY);
+    if (!existing?.startMs) await dbSaveSettings(LOSS_PAUSE_COVERAGE_KEY, { startMs: now });
+  }
+
   private async wasSent(key: string): Promise<boolean> {
     const value = await dbGetSettings(key);
     return Boolean(value?.status === "sent" || value?.sent === true);
   }
 
-  private async sendReportParts(
-    key: string,
-    type: "hourly" | "daily",
-    parts: string[],
-    context: Record<string, any>,
-  ): Promise<boolean> {
+  private async sendReportParts(key: string, type: "hourly" | "daily", parts: string[], context: Record<string, any>): Promise<boolean> {
     for (let index = 0; index < parts.length; index++) {
       const partKey = `${key}:p${index + 1}`;
       if (await this.wasSent(partKey)) continue;
@@ -174,19 +242,22 @@ export class TelegramReportService {
   }
 
   private async ensureDailyReport(now: number, isStartup: boolean) {
-    const window = previousUtcDay(now);
-    const key = dailyDeliveryKey(window);
+    const window = previousBangladeshDay(now);
+    const key = bangladeshDailyDeliveryKey(window);
     if (await this.wasSent(key)) return;
-    const logicalParts = await this.buildDailyReport(window, now);
+    const data = await this.buildDailyReportData(window, now);
+    const logicalParts = this.renderDailyReport(data);
     const parts = logicalParts.flatMap((part) => splitTelegramMessage(part));
     await this.sendReportParts(key, "daily", parts, {
-      tradingDay: formatUtcDay(window),
+      reportingDate: data.date,
+      timezone: REPORTING_TIMEZONE,
+      periodStart: new Date(window.startMs).toISOString(),
+      periodEnd: new Date(window.endMs).toISOString(),
       startupCatchup: isStartup,
     });
   }
 
   private async accountSnapshot(): Promise<{ snapshot: AccountSnapshot; errors: SourceError[] }> {
-    const errors: SourceError[] = [];
     try {
       const response: any = await this.bybit.getWalletBalance({ accountType: "UNIFIED", coin: "USDT" });
       if (response.retCode !== 0 || !response.result?.list?.length) throw new Error(response.retMsg || "wallet response unavailable");
@@ -199,11 +270,13 @@ export class TelegramReportService {
           available: finiteOrNull(account.totalAvailableBalance ?? coin.availableToWithdraw),
           capturedAt: Date.now(),
         },
-        errors,
+        errors: [],
       };
     } catch (error) {
-      errors.push({ source: "Bybit wallet", reason: errorText(error) });
-      return { snapshot: { wallet: null, equity: null, available: null, capturedAt: Date.now() }, errors };
+      return {
+        snapshot: { wallet: null, equity: null, available: null, capturedAt: Date.now() },
+        errors: [{ source: "Bybit wallet", reason: errorText(error) }],
+      };
     }
   }
 
@@ -217,19 +290,14 @@ export class TelegramReportService {
     }
   }
 
-  private async pagedRange(
-    source: "closedPnL" | "executions" | "orders",
-    window: ReportWindow,
-  ): Promise<{ items: any[]; errors: SourceError[] }> {
-    const errors: SourceError[] = [];
+  private async pagedRange(source: "closedPnL" | "executions" | "orders", window: ReportWindow): Promise<{ items: any[]; errors: SourceError[] }> {
     const timestamp = (item: any) => source === "closedPnL"
       ? unixMs(item.updatedTime || item.execTime || item.createdTime)
       : source === "executions"
         ? unixMs(item.execTime || item.createdTime)
         : unixMs(item.updatedTime || item.createdTime);
-
     try {
-      const fetchPage = async (cursor?: string): Promise<CursorPage<any>> => {
+      const items = await paginateUntilBoundary(async (cursor?: string) => {
         const common: any = {
           category: "linear",
           startTime: window.startMs,
@@ -243,29 +311,21 @@ export class TelegramReportService {
         else response = await (this.bybit as any).getHistoricOrders(common);
         if (response?.retCode !== 0) throw new Error(response?.retMsg || `${source} returned non-zero retCode`);
         return { items: response?.result?.list || [], nextCursor: response?.result?.nextPageCursor || null };
-      };
-      const items = await paginateUntilBoundary(fetchPage, window.startMs, timestamp, 100);
-      return { items: items.filter((item) => inWindow(timestamp(item), window)), errors };
+      }, window.startMs, timestamp, 100);
+      return { items: items.filter((item) => inWindow(timestamp(item), window)), errors: [] };
     } catch (error) {
-      errors.push({ source: `Bybit ${source}`, reason: errorText(error) });
-      return { items: [], errors };
+      return { items: [], errors: [{ source: `Bybit ${source}`, reason: errorText(error) }] };
     }
   }
 
   private async reportTrades(window: ReportWindow) {
-    const result = await dbGetReportTrades(window.startMs, window.endMs);
-    return result;
+    return await dbGetReportTrades(window.startMs, window.endMs);
   }
 
-  private classifyClosed(closed: any[], executions: any[], orders: any[], dbTrades: any[]): ClosedTradeLike[] {
+  private classifyClosed(closed: any[], executions: any[], orders: any[], dbTrades: any[]) {
     return closed.map((item) => {
-      const classified = classifyClosedTradeExit({
-        closedTrade: item,
-        executions,
-        orders,
-        localHistory: dbTrades,
-      });
-      const closedAt = unixMs(item.updatedTime || item.execTime || item.createdTime);
+      const classified = classifyClosedTradeExit({ closedTrade: item, executions, orders, localHistory: dbTrades });
+      const closedAt = Number(item.__timestampMs || unixMs(item.updatedTime || item.execTime || item.createdTime));
       const originalSide = item.side === "Sell" ? "LONG" : item.side === "Buy" ? "SHORT" : undefined;
       const dbMatch = dbTrades
         .filter((trade: any) => trade.symbol === item.symbol && trade.closedAt)
@@ -282,304 +342,238 @@ export class TelegramReportService {
   }
 
   private openingExecutions(executions: any[], window: ReportWindow) {
-    const byOrder = new Map<string, any>();
-    for (const item of executions) {
-      const t = unixMs(item.execTime || item.createdTime);
-      if (!inWindow(t, window)) continue;
-      const closedSize = Number(item.closedSize || 0);
-      const execQty = Number(item.execQty || 0);
-      if (!(execQty > 0) || closedSize > 0) continue;
-      const key = String(item.orderId || item.orderLinkId || item.execId || `${item.symbol}:${t}:${item.side}`);
-      if (!byOrder.has(key)) byOrder.set(key, item);
-    }
-    return [...byOrder.values()];
-  }
-
-  private async dailyRiskSnapshot(now: number) {
-    const dayStart = Date.UTC(
-      new Date(now).getUTCFullYear(),
-      new Date(now).getUTCMonth(),
-      new Date(now).getUTCDate(),
-      0, 0, 0, 0,
-    );
-    const range = { startMs: dayStart, endMs: now + 1 };
-    const [closed, positions, recentClosedResult] = await Promise.all([
-      this.pagedRange("closedPnL", range),
-      this.activePositions(),
-      (this.bybit as any).getClosedPnL({ category: "linear", limit: 100 }).catch((error: unknown) => ({ __error: error })),
-    ]);
-    const recentErrors: SourceError[] = [];
-    let recentClosed: any[] | null = null;
-    if (recentClosedResult?.__error) recentErrors.push({ source: "Bybit recent closed PnL", reason: errorText(recentClosedResult.__error) });
-    else if (recentClosedResult?.retCode !== 0) recentErrors.push({ source: "Bybit recent closed PnL", reason: recentClosedResult?.retMsg || "non-zero retCode" });
-    else recentClosed = recentClosedResult?.result?.list || [];
-
-    const realized = closed.errors.length ? null : closed.items.reduce((sum, item) => sum + Number(item.closedPnl || 0), 0);
-    const unrealized = positions.errors.length ? null : positions.positions.reduce((sum, item) => sum + Number(item.unrealisedPnl || 0), 0);
-    const net = realized !== null && unrealized !== null ? realized + unrealized : null;
-    const ordered = recentClosed === null ? [] : [...recentClosed].sort((a, b) => unixMs(b.updatedTime || b.execTime || b.createdTime) - unixMs(a.updatedTime || a.execTime || a.createdTime));
-    let consecutiveLosses: number | null = recentClosed === null ? null : 0;
-    if (consecutiveLosses !== null) {
-      for (const item of ordered) {
-        if (Number(item.closedPnl || 0) < 0) consecutiveLosses++;
-        else break;
-      }
-    }
-    const lastClose = ordered.length ? unixMs(ordered[0].updatedTime || ordered[0].execTime || ordered[0].createdTime) : 0;
-    const pauseRemainingMs = consecutiveLosses === null
-      ? null
-      : consecutiveLosses >= 3 ? Math.max(0, 30 * 60 * 1000 - (now - lastClose)) : 0;
-    return {
-      realized,
-      unrealized,
-      net,
-      consecutiveLosses,
-      pauseRemainingMs,
-      errors: [...closed.errors, ...positions.errors, ...recentErrors],
-    };
+    return dedupeOpeningExecutions(executions.map((item: any) => ({
+      ...item,
+      __timestampMs: unixMs(item.execTime || item.createdTime),
+    })), window);
   }
 
   private partialWarning(errors: SourceError[]): string {
     if (!errors.length) return "";
-    const sources = errors.map((e) => `${e.source}: ${e.reason}`).join("; ");
-    return `\n⚠️ Partial data — some upstream trading history could not be retrieved. ${sources}\n`;
+    return `\n⚠️ Partial data — ${errors.map((e) => `${e.source}: ${e.reason}`).join("; ")}\n`;
   }
 
   private async buildHourlyReport(window: ReportWindow): Promise<string> {
-    const [account, positions, closed, executions, orders, db, risk, runtime] = await Promise.all([
+    const [account, positions, closed, executions] = await Promise.all([
+      this.accountSnapshot(), this.activePositions(), this.pagedRange("closedPnL", window), this.pagedRange("executions", window),
+    ]);
+    const errors = [...account.errors, ...positions.errors, ...closed.errors, ...executions.errors];
+    const aggregated = closed.errors.length ? [] : aggregateClosedPnlByIdentity(closed.items, (x) => unixMs(x.updatedTime || x.execTime || x.createdTime));
+    const stats = closed.errors.length ? null : summarizeClosedTrades(aggregated.map((x) => ({ pnl: Number(x.closedPnl) })));
+    const opens = executions.errors.length ? null : this.openingExecutions(executions.items, window);
+    let message = `📊 HOURLY TRADING REPORT\n🕐 ${formatUtcHourWindow(window)}\n${this.partialWarning(errors)}`;
+    message += `\n💰 Account\nWallet: ${formatMoney(account.snapshot.wallet)}\nEquity: ${formatMoney(account.snapshot.equity)}\nAvailable: ${formatMoney(account.snapshot.available)}\n`;
+    message += `\n📈 Trading\nOpened: ${opens ? opens.length : "Unavailable"}\nClosed: ${stats ? stats.closed : "Unavailable"}\nRealized: ${stats ? formatMoney(stats.realized) : "Unavailable"}\n`;
+    message += `\n📌 Positions\nActive: ${positions.errors.length ? "Unavailable" : `${positions.positions.length}/3`}\n`;
+    if (!positions.errors.length && positions.positions.length) message += positions.positions.map(positionLine).join("\n");
+    return message;
+  }
+
+  private async buildDailyReportData(window: ReportWindow, reportTime: number): Promise<DailyReportData> {
+    const [accountNow, positionsNow, closed, executions, orders, db, runtime, startSnapshotResult, endSnapshotResult, lossPauseEvents, lossPauseMarker] = await Promise.all([
       this.accountSnapshot(),
       this.activePositions(),
       this.pagedRange("closedPnL", window),
       this.pagedRange("executions", window),
       this.pagedRange("orders", window),
       this.reportTrades(window),
-      this.dailyRiskSnapshot(window.endMs),
-      dbGetSettings(`reportmetrics:h:${new Date(window.startMs).toISOString().slice(0, 13)}`),
+      dbGetSettings(`reportmetrics:d:bdt:${formatBangladeshDay(window)}`),
+      dbGetAccountSnapshot(window.startMs, REPORTING_TIMEZONE),
+      dbGetAccountSnapshot(window.endMs, REPORTING_TIMEZONE),
+      dbGetReportEvents("loss_pause_trigger", window.startMs, window.endMs),
+      dbGetSettings(LOSS_PAUSE_COVERAGE_KEY),
     ]);
+
     const errors: SourceError[] = [
-      ...account.errors,
-      ...positions.errors,
+      ...accountNow.errors,
+      ...positionsNow.errors,
       ...closed.errors,
       ...executions.errors,
       ...orders.errors,
       ...(db.ok ? [] : [{ source: "Database report trades", reason: db.error || "unavailable" }]),
-      ...risk.errors,
+      ...(startSnapshotResult.ok ? [] : [{ source: "Account start snapshot store", reason: startSnapshotResult.error || "unavailable" }]),
+      ...(endSnapshotResult.ok ? [] : [{ source: "Account end snapshot store", reason: endSnapshotResult.error || "unavailable" }]),
+      ...(lossPauseEvents.ok ? [] : [{ source: "Loss-pause event store", reason: lossPauseEvents.error || "unavailable" }]),
     ];
+
     const dbTrades = db.ok ? db.rows : [];
-    const classified = closed.errors.length ? [] : this.classifyClosed(closed.items, executions.items, orders.items, dbTrades);
+    const aggregatedClosed = closed.errors.length ? [] : aggregateClosedPnlByIdentity(closed.items, (x) => unixMs(x.updatedTime || x.execTime || x.createdTime));
+    const classified = closed.errors.length ? [] : this.classifyClosed(aggregatedClosed, executions.items, orders.items, dbTrades);
     const stats = closed.errors.length ? null : summarizeClosedTrades(classified);
-    const opens = executions.errors.length ? null : this.openingExecutions(executions.items, window);
-    const qualityTrades = dbTrades
-      .filter((t: any) => t.openedAt >= window.startMs && t.openedAt < window.endMs && t.entryDiagnostics)
-      .map((t: any) => ({ pnl: Number(t.realizedPnl || 0), entryDiagnostics: t.entryDiagnostics }));
-    const alignedCount = qualityTrades.filter((t: any) => {
-      const d = t.entryDiagnostics;
-      return (String(d.trendState).toLowerCase().includes("bull") && d.emaTimingState === "Bullish") ||
-        (String(d.trendState).toLowerCase().includes("bear") && d.emaTimingState === "Bearish");
-    }).length;
-    const freshCrossCount = qualityTrades.filter((t: any) => ["bullish", "bearish"].includes(String(t.entryDiagnostics?.freshCross))).length;
-    const avgTiming = safeAverage(qualityTrades.map((t: any) => t.entryDiagnostics?.emaTimingScore));
-    const scannerState = this.engine.scanner.getState();
-    const dailyRoom = risk.net === null ? null : 50 + risk.net;
+    const openingExecs = executions.errors.length ? null : this.openingExecutions(executions.items, window);
+    const exchangeOpenedCount = openingExecs ? openingExecs.length : null;
+    const exchangeClosedCount = closed.errors.length ? null : aggregatedClosed.length;
+    const reconciliation = db.ok ? reconcileTradeLifecycles(dbTrades, window, exchangeOpenedCount, exchangeClosedCount) : null;
 
-    let message = `📊 HOURLY TRADING REPORT\n🕐 ${formatUtcHourWindow(window)}\n`;
-    message += this.partialWarning(errors);
-    message += `\n💰 Account\n`;
-    message += `Wallet: ${formatMoney(account.snapshot.wallet)}\n`;
-    message += `Equity: ${formatMoney(account.snapshot.equity)}\n`;
-    message += `Available: ${formatMoney(account.snapshot.available)}\n`;
-    message += `Realized this hour: ${stats ? formatMoney(stats.realized) : "Unavailable"}\n`;
-    message += `Unrealized now: ${formatMoney(risk.unrealized)}\n`;
+    const openedDbRows = dbTrades.filter((t: any) => t.openedAt >= window.startMs && t.openedAt < window.endMs);
+    const sourceAttribution = db.ok ? summarizeTradeSourceCoverage(openedDbRows, exchangeOpenedCount) : null;
+    const sourceUnmatchedExchange = sourceAttribution ? Math.max(0, sourceAttribution.expected - openedDbRows.length) : 0;
 
-    message += `\n📈 Trading\n`;
-    message += `Opened: ${opens ? opens.length : "Unavailable"}\n`;
-    message += `Closed: ${stats ? stats.closed : "Unavailable"}\n`;
-    if (stats) {
-      message += `W/L: ${stats.wins} / ${stats.losses} | Win rate: ${stats.winRate.toFixed(1)}%\n`;
-      message += `TP ${stats.exits.TP} | SL ${stats.exits.SL} | Trail ${stats.exits.Trailing} | Manual ${stats.exits.Manual} | Other ${stats.exits.Other}\n`;
-      if (stats.closed === 0) message += `No trades executed during this hour.\n`;
-    }
+    const dayClosedDb = dbTrades.filter((t: any) => t.closedAt && inWindow(t.closedAt, window));
+    const emaDenominator = Math.max(dayClosedDb.length, exchangeClosedCount || 0);
+    const emaCoveredRows = dayClosedDb.filter(hasUsableEmaTimingMetadata);
+    const emaQualityTrades = emaCoveredRows.map((t: any) => ({
+      pnl: Number(t.realizedPnl), exitLabel: t.exitReason, side: t.side === "Buy" ? "LONG" : "SHORT",
+      openedAt: t.openedAt, closedAt: t.closedAt, entryDiagnostics: t.entryDiagnostics,
+    }));
+    const emaQuality = emaCoveredRows.length ? qualityBreakdown(emaQualityTrades) : null;
+    const averageScore = safeAverage(emaCoveredRows.map((t: any) => t.entryDiagnostics?.emaTimingScore));
 
-    message += `\n📌 Positions\nActive: ${positions.errors.length ? "Unavailable" : `${positions.positions.length}/3`}\n`;
-    if (!positions.errors.length && positions.positions.length) message += `${positions.positions.map(positionLine).join("\n")}\n`;
+    const longStats = stats ? summarizeClosedTrades(classified.filter((t: any) => t.side === "LONG")) : null;
+    const shortStats = stats ? summarizeClosedTrades(classified.filter((t: any) => t.side === "SHORT")) : null;
+    const sortedPnl = classified.filter((t: any) => Number.isFinite(t.pnl)).sort((a: any, b: any) => b.pnl - a.pnl);
+    const durations = dayClosedDb.map((t: any) => t.openedAt && t.closedAt ? t.closedAt - t.openedAt : NaN).filter(Number.isFinite);
 
-    message += `\n🤖 Auto strategy\n`;
-    message += `Scanner engine: ${this.engine.getIsRunning() ? "ON" : "OFF"}\n`;
-    message += `Auto-trade: ${this.engine.scanner.autoTrade ? "ON" : "OFF"}\n`;
-    message += `Candidates scanned: ${runtime?.scannedCandidates ?? "Unavailable"}\n`;
-    message += `Six-gate passes: ${runtime?.sixGatePasses ?? "Unavailable"}\n`;
-    const autoRows = dbTrades.filter((t: any) => t.openedAt >= window.startMs && t.openedAt < window.endMs && t.entryDiagnostics);
-    message += `Actual auto entries: ${db.ok ? autoRows.length : "Unavailable"}\n`;
-    const lastAuto = autoRows.sort((a: any, b: any) => b.openedAt - a.openedAt)[0];
-    message += `Last auto trade: ${lastAuto ? new Date(lastAuto.openedAt).toISOString() : "—"}\n`;
+    const slCoveredRows = dayClosedDb.filter((t: any) => Number.isFinite(Number(t.entryDiagnostics?.slDistancePercent)));
+    const avgSlDistance = safeAverage(slCoveredRows.map((t: any) => t.entryDiagnostics.slDistancePercent));
+    const reducedCoveredRows = dayClosedDb.filter((t: any) => Number.isFinite(Number(t.entryDiagnostics?.actualMarginUsedUsdt)) && Number.isFinite(Number(t.entryDiagnostics?.configuredMarginCapUsdt)));
+    const reducedNotionalCount = reducedCoveredRows.length ? reducedCoveredRows.filter((t: any) => Number(t.entryDiagnostics.actualMarginUsedUsdt) < Number(t.entryDiagnostics.configuredMarginCapUsdt) - 0.01).length : null;
+    const breakoutCoveredRows = dayClosedDb.filter((t: any) => typeof t.entryDiagnostics?.breakoutBonus === "boolean");
+    const breakoutBonusTrades = breakoutCoveredRows.length ? breakoutCoveredRows.filter((t: any) => t.entryDiagnostics.breakoutBonus === true).length : null;
 
-    message += `\n⚡ EMA Timing\n`;
-    message += `Aligned: ${db.ok ? alignedCount : "Unavailable"}\n`;
-    message += `Fresh Cross: ${db.ok ? freshCrossCount : "Unavailable"}\n`;
-    message += `Avg Score: ${avgTiming === null ? "Unavailable" : `${avgTiming.toFixed(2)}/2`}\n`;
+    const runtimeCoverage = coverageForWindow(runtime?.coverageStart, window);
+    const breakerStatus: DailyReportData["risk"]["breakerStatus"] = runtime?.breakerTriggered === true
+      ? "YES"
+      : runtimeCoverage === "FULL" ? "NO" : runtimeCoverage === "PARTIAL" ? "PARTIAL" : "UNAVAILABLE";
+    const lossPauseCoverage = coverageForWindow(lossPauseMarker?.startMs, window);
+    const lossPauseCount = lossPauseEvents.ok && (lossPauseCoverage === "FULL" || lossPauseEvents.rows.length > 0) ? lossPauseEvents.rows.length : null;
 
-    message += `\n🛡 Risk\n`;
-    message += `UTC daily realized: ${formatMoney(risk.realized)}\n`;
-    message += `Daily net: ${formatMoney(risk.net)}\n`;
-    message += `Breaker: ${this.engine.circuitBreakerTriggered ? "ACTIVE" : "SAFE"}\n`;
-    message += `Consecutive losses: ${risk.consecutiveLosses === null ? "Unavailable" : risk.consecutiveLosses}\n`;
-    message += `Loss pause: ${risk.pauseRemainingMs === null ? "Unavailable" : risk.pauseRemainingMs > 0 ? `ON (${Math.ceil(risk.pauseRemainingMs / 60000)}m)` : "OFF"}\n`;
-    message += `Room before -$50 breaker: ${dailyRoom === null ? "Unavailable" : formatMoney(Math.max(0, dailyRoom))}`;
-    return message;
+    const startSnapshot = startSnapshotResult.ok && startSnapshotResult.row?.reliableBoundary ? startSnapshotResult.row : null;
+    const endSnapshot = endSnapshotResult.ok && endSnapshotResult.row?.reliableBoundary ? endSnapshotResult.row : null;
+    const netAccountChange = startSnapshot && endSnapshot && Number.isFinite(Number(startSnapshot.equity)) && Number.isFinite(Number(endSnapshot.equity))
+      ? Number(endSnapshot.equity) - Number(startSnapshot.equity)
+      : null;
+    const currentUnrealized = positionsNow.errors.length ? null : positionsNow.positions.reduce((sum, p) => sum + Number(p.unrealisedPnl || 0), 0);
+
+    return {
+      date: formatBangladeshDay(window),
+      partialErrors: errors,
+      account: {
+        startingWallet: startSnapshot ? finiteOrNull(startSnapshot.wallet) : null,
+        startingEquity: startSnapshot ? finiteOrNull(startSnapshot.equity) : null,
+        endingWallet: endSnapshot ? finiteOrNull(endSnapshot.wallet) : null,
+        endingEquity: endSnapshot ? finiteOrNull(endSnapshot.equity) : null,
+        currentUnrealized,
+        netAccountChange,
+      },
+      performance: stats,
+      bestPnl: sortedPnl.length ? sortedPnl[0].pnl : null,
+      worstPnl: sortedPnl.length ? sortedPnl[sortedPnl.length - 1].pnl : null,
+      averageDurationMs: safeAverage(durations),
+      reconciliation,
+      exchangeOpenedCount,
+      exchangeClosedCount,
+      sourceAttribution,
+      sourceUnmatchedExchange,
+      ema: { denominator: emaDenominator, covered: emaCoveredRows.length, quality: emaQuality, averageScore },
+      exits: stats?.exits || null,
+      longStats,
+      shortStats,
+      risk: {
+        runtimeCoverage,
+        maxPositionsObserved: runtime && Number.isFinite(Number(runtime.maxPositionsObserved)) ? Number(runtime.maxPositionsObserved) : null,
+        breakerStatus,
+        lossPauseCount,
+        lossPauseCoverage,
+        maxLossStreak: stats ? maxConsecutiveLosses([...classified].sort((a: any, b: any) => Number(a.closedAt || 0) - Number(b.closedAt || 0))) : null,
+        slRate: stats && stats.closed ? stats.exits.SL / stats.closed * 100 : stats ? 0 : null,
+        avgSlDistance,
+        slCoverage: slCoveredRows.length,
+        reducedNotionalCount,
+        reducedNotionalCoverage: reducedCoveredRows.length,
+      },
+      scanner: {
+        runtimeCoverage,
+        scannedCandidates: runtime && Number.isFinite(Number(runtime.scannedCandidates)) ? Number(runtime.scannedCandidates) : null,
+        sixGatePasses: runtime && Number.isFinite(Number(runtime.sixGatePasses)) ? Number(runtime.sixGatePasses) : null,
+        breakoutBonusTrades,
+        breakoutCoverage: breakoutCoveredRows.length,
+      },
+    };
   }
 
-  private async buildDailyReport(window: ReportWindow, reportTime: number): Promise<string[]> {
-    const [accountEnd, closed, executions, orders, db, runtime] = await Promise.all([
-      this.accountSnapshot(),
-      this.pagedRange("closedPnL", window),
-      this.pagedRange("executions", window),
-      this.pagedRange("orders", window),
-      this.reportTrades(window),
-      dbGetSettings(`reportmetrics:d:${formatUtcDay(window)}`),
-    ]);
-    const startSnapshot = await dbGetSettings(`reportaccount:${formatUtcDay(window)}`);
-    const endSnapshotKey = `reportaccount:${new Date(window.endMs).toISOString().slice(0, 10)}`;
-    const storedEndSnapshot = await dbGetSettings(endSnapshotKey);
-    const endSnapshot = storedEndSnapshot?.reliableBoundary === true
-      ? storedEndSnapshot
-      : reportTime - window.endMs <= 60_000 && accountEnd.errors.length === 0
-        ? { ...accountEnd.snapshot, reliableBoundary: true }
-        : null;
-    const errors: SourceError[] = [
-      ...accountEnd.errors,
-      ...closed.errors,
-      ...executions.errors,
-      ...orders.errors,
-      ...(db.ok ? [] : [{ source: "Database report trades", reason: db.error || "unavailable" }]),
-    ];
-    const dbTrades = db.ok ? db.rows : [];
-    const classified = closed.errors.length ? [] : this.classifyClosed(closed.items, executions.items, orders.items, dbTrades);
-    const stats = closed.errors.length ? null : summarizeClosedTrades(classified);
-    const opens = executions.errors.length ? null : this.openingExecutions(executions.items, window);
-    const dayClosedDb = dbTrades.filter((t: any) => t.closedAt && inWindow(t.closedAt, window));
-    const closedWithMetadata: ClosedTradeLike[] = dayClosedDb.map((t: any) => ({
-      pnl: Number(t.realizedPnl),
-      exitLabel: t.exitReason,
-      side: t.side === "Buy" ? "LONG" : "SHORT",
-      openedAt: t.openedAt,
-      closedAt: t.closedAt,
-      entryDiagnostics: t.entryDiagnostics,
-    }));
-    const quality = qualityBreakdown(closedWithMetadata);
-    const longClosed = classified.filter((t) => t.side === "LONG");
-    const shortClosed = classified.filter((t) => t.side === "SHORT");
-    const longStats = summarizeClosedTrades(longClosed);
-    const shortStats = summarizeClosedTrades(shortClosed);
-    const openExecs = opens || [];
-    const longOpened = openExecs.filter((e: any) => e.side === "Buy").length;
-    const shortOpened = openExecs.filter((e: any) => e.side === "Sell").length;
-    const sortedPnl = classified.filter((t) => Number.isFinite(t.pnl)).sort((a, b) => b.pnl - a.pnl);
-    const durations = closedWithMetadata
-      .map((t) => t.openedAt && t.closedAt ? t.closedAt - t.openedAt : NaN)
-      .filter(Number.isFinite);
-    const avgDurationMs = safeAverage(durations);
-    const slDistances = dayClosedDb.map((t: any) => t.entryDiagnostics?.slDistancePercent);
-    const avgSl = safeAverage(slDistances);
-    const reducedNotional = dayClosedDb.filter((t: any) => {
-      const d = t.entryDiagnostics;
-      return Number.isFinite(Number(d?.actualMarginUsedUsdt)) && Number(d.actualMarginUsedUsdt) < 49.99;
-    }).length;
-    const emaScores = dayClosedDb.map((t: any) => t.entryDiagnostics?.emaTimingScore);
-    const avgEmaScore = safeAverage(emaScores);
-    const freshCrossUsed = dayClosedDb.filter((t: any) => ["bullish", "bearish"].includes(String(t.entryDiagnostics?.freshCross))).length;
-    const breakoutTrades = dayClosedDb.filter((t: any) => t.entryDiagnostics?.breakoutBonus === true).length;
-    const openAtEnd = db.ok ? db.rows.filter((t: any) => t.openedAt < window.endMs && (!t.closedAt || t.closedAt >= window.endMs)) : [];
-    const maxLossStreak = maxConsecutiveLosses([...classified].sort((a, b) => Number(a.closedAt || 0) - Number(b.closedAt || 0)));
-    const partial = this.partialWarning(errors);
-    const day = formatUtcDay(window);
+  private renderDailyReport(data: DailyReportData): string[] {
+    const partial = this.partialWarning(data.partialErrors);
+    const r = data.reconciliation;
+    const dayStartOpen = r ? String(r.dayStartOpen) : "Unavailable";
+    const opened = r ? String(r.openedDuringWindow) : data.exchangeOpenedCount === null ? "Unavailable" : `${data.exchangeOpenedCount} (exchange-only)`;
+    const closed = r ? String(r.closedDuringWindow) : data.exchangeClosedCount === null ? "Unavailable" : `${data.exchangeClosedCount} (exchange-only)`;
+    const dayEndOpen = r ? String(r.dayEndOpen) : "Unavailable";
+    const reconciliation = r ? `${r.status}${r.status === "FAIL" ? ` (delta ${r.delta})` : r.status === "PARTIAL" ? ` — ${r.reason}` : ""}` : "UNAVAILABLE";
 
-    const reliableStart = startSnapshot?.reliableBoundary === true ? startSnapshot : null;
-    const reliableEnd = endSnapshot;
-    const netAccountChange = reliableStart && reliableEnd && Number.isFinite(Number(reliableStart.equity)) && Number.isFinite(Number(reliableEnd.equity))
-      ? Number(reliableEnd.equity) - Number(reliableStart.equity)
-      : null;
-
-    let part1 = `📈 FULL DAY TRADING REPORT — Daily Report 1/3\nDate: ${day} UTC\n${partial}`;
+    let part1 = `📈 FULL DAY TRADING REPORT — Daily Report 1/3\nDate: ${data.date} BDT\n${partial}`;
     part1 += `\n💰 ACCOUNT\n`;
-    part1 += `Starting wallet: ${reliableStart ? formatMoney(finiteOrNull(reliableStart.wallet)) : "Unavailable"}\n`;
-    part1 += `Starting equity: ${reliableStart ? formatMoney(finiteOrNull(reliableStart.equity)) : "Unavailable"}\n`;
-    part1 += `Ending wallet: ${reliableEnd ? formatMoney(finiteOrNull(reliableEnd.wallet)) : "Unavailable"}\n`;
-    part1 += `Ending equity: ${reliableEnd ? formatMoney(finiteOrNull(reliableEnd.equity)) : "Unavailable"}\n`;
-    part1 += `Net realized PnL: ${stats ? formatMoney(stats.realized) : "Unavailable"}\n`;
-    const currentPositions = await this.activePositions();
-    const reportUnrealized = currentPositions.errors.length ? null : currentPositions.positions.reduce((s, p) => s + Number(p.unrealisedPnl || 0), 0);
-    part1 += `Unrealized at report time: ${formatMoney(reportUnrealized)}\n`;
-    part1 += `Net account change: ${formatMoney(netAccountChange)}\n`;
-
-    part1 += `\n📈 TRADES\n`;
-    part1 += `Opened: ${opens ? opens.length : "Unavailable"}\n`;
-    part1 += `Closed: ${stats ? stats.closed : "Unavailable"}\n`;
-    if (stats) {
-      part1 += `W/L: ${stats.wins}/${stats.losses} | Win rate ${stats.winRate.toFixed(1)}%\n`;
-      part1 += `Gross profit: ${formatMoney(stats.grossProfit)} | Gross loss: ${formatMoney(stats.grossLoss)}\n`;
-      part1 += `Average PnL: ${formatMoney(stats.averagePnl)}\n`;
-      part1 += `Best: ${sortedPnl[0] ? formatMoney(sortedPnl[0].pnl) : "—"}\n`;
-      part1 += `Worst: ${sortedPnl.length ? formatMoney(sortedPnl[sortedPnl.length - 1].pnl) : "—"}\n`;
+    part1 += `Starting wallet: ${formatMoney(data.account.startingWallet)}\n`;
+    part1 += `Starting equity: ${formatMoney(data.account.startingEquity)}\n`;
+    part1 += `Ending wallet: ${formatMoney(data.account.endingWallet)}\n`;
+    part1 += `Ending equity: ${formatMoney(data.account.endingEquity)}\n`;
+    part1 += `Net realized PnL: ${data.performance ? formatMoney(data.performance.realized) : "Unavailable"}\n`;
+    part1 += `Unrealized at report time: ${formatMoney(data.account.currentUnrealized)}\n`;
+    part1 += `Net account change: ${formatMoney(data.account.netAccountChange)}\n`;
+    part1 += `\n📈 TRADES\nDay-start open: ${dayStartOpen}\nOpened: ${opened}\nClosed: ${closed}\nDay-end open: ${dayEndOpen}\nAccounting reconciliation: ${reconciliation}\n`;
+    if (data.performance) {
+      part1 += `W/L: ${data.performance.wins}/${data.performance.losses} | Win rate ${data.performance.winRate.toFixed(1)}%\n`;
+      part1 += `Gross profit: ${formatMoney(data.performance.grossProfit)} | Gross loss: ${formatMoney(data.performance.grossLoss)}\n`;
+      part1 += `Average PnL: ${formatMoney(data.performance.averagePnl)}\n`;
+      part1 += `Best: ${data.bestPnl === null ? "—" : formatMoney(data.bestPnl)} | Worst: ${data.worstPnl === null ? "—" : formatMoney(data.worstPnl)}\n`;
     }
-    part1 += `Avg duration: ${avgDurationMs === null ? "Unavailable" : `${(avgDurationMs / 60000).toFixed(1)} min`}\n`;
+    part1 += `Avg duration: ${data.averageDurationMs === null ? "Unavailable" : `${(data.averageDurationMs / 60000).toFixed(1)} min`}\n`;
 
-    let part2 = `📈 FULL DAY TRADING REPORT — Daily Report 2/3\nDate: ${day} UTC\n`;
+    let part2 = `📈 FULL DAY TRADING REPORT — Daily Report 2/3\nDate: ${data.date} BDT\n`;
     part2 += `\n🚪 EXIT BREAKDOWN\n`;
-    if (stats) part2 += `TP ${stats.exits.TP} | SL ${stats.exits.SL} | Trail ${stats.exits.Trailing} | Manual ${stats.exits.Manual} | Other ${stats.exits.Other}\n`;
-    else part2 += `Unavailable\n`;
+    part2 += data.exits ? `TP ${data.exits.TP} | SL ${data.exits.SL} | Trail ${data.exits.Trailing} | Manual ${data.exits.Manual} | Other ${data.exits.Other}\n` : `Unavailable\n`;
     part2 += `Exit reasons are metadata-based; PnL sign is never used to infer TP/SL.\n`;
+    if (data.longStats && data.shortStats) {
+      part2 += `\n↕️ LONG / SHORT\nLong closed ${data.longStats.closed} | W/L ${data.longStats.wins}/${data.longStats.losses} | PnL ${formatMoney(data.longStats.realized)}\n`;
+      part2 += `Short closed ${data.shortStats.closed} | W/L ${data.shortStats.wins}/${data.shortStats.losses} | PnL ${formatMoney(data.shortStats.realized)}\n`;
+    }
 
-    part2 += `\n↕️ LONG / SHORT\n`;
-    part2 += `Long opened: ${opens ? longOpened : "Unavailable"} | closed ${closed.errors.length ? "Unavailable" : longStats.closed} | W/L ${closed.errors.length ? "—" : `${longStats.wins}/${longStats.losses}`} | PnL ${closed.errors.length ? "Unavailable" : formatMoney(longStats.realized)} | WR ${closed.errors.length || !longStats.closed ? "—" : `${longStats.winRate.toFixed(1)}%`}\n`;
-    part2 += `Short opened: ${opens ? shortOpened : "Unavailable"} | closed ${closed.errors.length ? "Unavailable" : shortStats.closed} | W/L ${closed.errors.length ? "—" : `${shortStats.wins}/${shortStats.losses}`} | PnL ${closed.errors.length ? "Unavailable" : formatMoney(shortStats.realized)} | WR ${closed.errors.length || !shortStats.closed ? "—" : `${shortStats.winRate.toFixed(1)}%`}\n`;
+    part2 += `\n🤖 AUTO ATTRIBUTION\n`;
+    if (!data.sourceAttribution || (data.sourceAttribution.expected > 0 && data.sourceAttribution.known === 0)) {
+      part2 += `Auto trades executed: Unavailable\nManual: Unavailable\nExternal/Unknown: Unavailable\nCoverage: 0/${data.sourceAttribution?.expected ?? data.exchangeOpenedCount ?? "?"}\n`;
+    } else {
+      const suffix = data.sourceAttribution.full ? "" : " (partial coverage)";
+      part2 += `Auto: ${data.sourceAttribution.auto}${suffix}\nManual: ${data.sourceAttribution.manual}${suffix}\nExternal/Unknown: ${data.sourceAttribution.external + data.sourceAttribution.unknown + data.sourceUnmatchedExchange}${suffix}\n`;
+      part2 += `Coverage: ${data.sourceAttribution.known}/${data.sourceAttribution.expected} opening lifecycles\n`;
+    }
 
-    const groupLine = (name: string, g: any) => `${name}: ${g.count} | WR ${g.winRate === null ? "—" : `${g.winRate.toFixed(1)}%`} | SL ${g.slRate === null ? "—" : `${g.slRate.toFixed(1)}%`} | Avg ${g.avgPnl === null ? "—" : formatMoney(g.avgPnl)}`;
     part2 += `\n⚡ EMA9/21 QUALITY\n`;
-    if (db.ok) {
-      part2 += `${groupLine("Aligned", quality.aligned)}\n`;
-      part2 += `${groupLine("Non-aligned/neutral", quality.nonAligned)}\n`;
-      part2 += `${groupLine("Fresh cross", quality.freshCross)}\n`;
-      part2 += `${groupLine("No fresh cross", quality.noFreshCross)}\n`;
-    } else part2 += `Unavailable\n`;
+    if (data.ema.denominator > 0 && data.ema.covered === 0) {
+      part2 += `Unavailable — historical trades predate or lack EMA timing metadata\n`;
+    } else if (data.ema.denominator === 0) {
+      part2 += `Coverage: 0/0 trades\nAligned: 0 | Non-aligned/neutral: 0 | Fresh cross: 0 | No fresh cross: 0 | Avg score: —\n`;
+    } else if (data.ema.quality) {
+      part2 += `Coverage: ${data.ema.covered}/${data.ema.denominator} trades${data.ema.covered < data.ema.denominator ? " (partial)" : ""}\n`;
+      part2 += `Aligned: ${data.ema.quality.aligned.count} | Non-aligned/neutral: ${data.ema.quality.nonAligned.count}\n`;
+      part2 += `Fresh cross: ${data.ema.quality.freshCross.count} | No fresh cross: ${data.ema.quality.noFreshCross.count}\n`;
+      part2 += `Avg score: ${data.ema.averageScore === null ? "Unavailable" : `${data.ema.averageScore.toFixed(2)}/2`}\n`;
+    }
 
-    let part3 = `📈 FULL DAY TRADING REPORT — Daily Report 3/3\nDate: ${day} UTC\n`;
+    let part3 = `📈 FULL DAY TRADING REPORT — Daily Report 3/3\nDate: ${data.date} BDT\n`;
     part3 += `\n🛡 RISK\n`;
-    part3 += `Max simultaneous positions observed: ${runtime?.maxPositionsObserved ?? "Unavailable"}\n`;
-    part3 += `Daily breaker triggered: ${runtime ? (runtime.breakerTriggered ? "Yes" : "No") : "Unavailable"}\n`;
-    part3 += `3-loss pause triggered count: ${runtime?.lossPauseTriggeredCount ?? "Unavailable"}\n`;
-    part3 += `Max consecutive losses: ${closed.errors.length ? "Unavailable" : maxLossStreak}\n`;
-    part3 += `SL rate: ${stats && stats.closed ? `${(stats.exits.SL / stats.closed * 100).toFixed(1)}%` : stats ? "0.0%" : "Unavailable"}\n`;
-    part3 += `Adaptive SL avg distance: ${avgSl === null ? "Unavailable" : `${avgSl.toFixed(2)}%`}\n`;
-    part3 += `Wider-SL reduced-notional trades: ${db.ok ? reducedNotional : "Unavailable"}\n`;
-
+    part3 += `Max simultaneous positions observed: ${observedMetric(data.risk.maxPositionsObserved, data.risk.runtimeCoverage)}\n`;
+    part3 += `Breaker historical status: ${data.risk.breakerStatus}\n`;
+    part3 += `3-loss pause triggered count: ${data.risk.lossPauseCount === null ? "Unavailable" : data.risk.lossPauseCoverage === "FULL" ? data.risk.lossPauseCount : `${data.risk.lossPauseCount} (partial coverage)`}\n`;
+    part3 += `Max consecutive losses: ${data.risk.maxLossStreak === null ? "Unavailable" : data.risk.maxLossStreak}\n`;
+    part3 += `SL rate: ${data.risk.slRate === null ? "Unavailable" : `${data.risk.slRate.toFixed(1)}%`}\n`;
+    part3 += `Adaptive SL avg distance: ${data.risk.avgSlDistance === null ? "Unavailable" : `${data.risk.avgSlDistance.toFixed(2)}%`} | Coverage ${data.risk.slCoverage}/${data.exchangeClosedCount ?? "?"}\n`;
+    part3 += `Wider-SL reduced-notional: ${data.risk.reducedNotionalCount === null ? "Unavailable" : data.risk.reducedNotionalCount} | Coverage ${data.risk.reducedNotionalCoverage}/${data.exchangeClosedCount ?? "?"}\n`;
     part3 += `\n🔎 SCANNER / STRATEGY\n`;
-    part3 += `Scanned candidates: ${runtime?.scannedCandidates ?? "Unavailable"}\n`;
-    part3 += `Six-gate qualified setups: ${runtime?.sixGatePasses ?? "Unavailable"}\n`;
-    const autoEntries = db.ok ? db.rows.filter((t: any) => t.openedAt >= window.startMs && t.openedAt < window.endMs && t.entryDiagnostics).length : null;
-    part3 += `Auto trades executed: ${autoEntries ?? "Unavailable"}\n`;
-    part3 += `EMA timing avg score: ${avgEmaScore === null ? "Unavailable" : `${avgEmaScore.toFixed(2)}/2`}\n`;
-    part3 += `Fresh crosses used: ${db.ok ? freshCrossUsed : "Unavailable"}\n`;
-    part3 += `Breakout bonus trades: ${db.ok ? breakoutTrades : "Unavailable"}\n`;
-
-    part3 += `\n📌 OPEN POSITIONS AT DAY END\n`;
-    if (!db.ok) part3 += `Unavailable\n`;
-    else if (!openAtEnd.length) part3 += `None\n`;
-    else part3 += `${openAtEnd.map((t: any) => `• ${t.symbol} ${t.side} | Entry $${Number(t.entryPrice).toFixed(4)} | opened ${new Date(t.openedAt).toISOString()}`).join("\n")}\n`;
-    if (reportTime - window.endMs > 5 * 60 * 1000) part3 += `\nCatch-up note: report sent after the scheduled boundary; account unrealized is current report-time data.`;
-
+    part3 += `Scanned candidates: ${observedMetric(data.scanner.scannedCandidates, data.scanner.runtimeCoverage)}\n`;
+    part3 += `Six-gate qualified setups: ${observedMetric(data.scanner.sixGatePasses, data.scanner.runtimeCoverage)}\n`;
+    part3 += `Breakout bonus trades: ${data.scanner.breakoutBonusTrades === null ? "Unavailable" : data.scanner.breakoutBonusTrades} | Coverage ${data.scanner.breakoutCoverage}/${data.exchangeClosedCount ?? "?"}\n`;
     return [part1, part2, part3];
   }
 
   private async observeRuntime(now: number) {
     const scanner = this.engine.scanner.getState();
     const hour = previousFullUtcHour(now + 60 * 60 * 1000);
-    const dayStart = Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), new Date(now).getUTCDate());
-    const day: ReportWindow = { startMs: dayStart, endMs: dayStart + 24 * 60 * 60 * 1000 };
+    const bdtDay = currentBangladeshDay(now);
     const lastObserved = await dbGetSettings("telegram:scanner:lastObserved");
     const isNewScan = scanner.lastScanTime && scanner.lastScanTime !== lastObserved?.lastScanTime;
 
     const update = async (key: string) => {
-      const current: RuntimeMetrics & { lossPauseTriggeredCount?: number; pauseWasActive?: boolean } = await dbGetSettings(key) || {
+      const current: RuntimeMetrics = await dbGetSettings(key) || {
         coverageStart: now,
         scannedCandidates: 0,
         sixGatePasses: 0,
@@ -588,7 +582,7 @@ export class TelegramReportService {
         maxPositionsObserved: 0,
         breakerTriggered: false,
       };
-      current.maxPositionsObserved = Math.max(current.maxPositionsObserved || 0, this.engine.activePositions.length);
+      current.maxPositionsObserved = Math.max(Number(current.maxPositionsObserved || 0), this.engine.activePositions.length);
       current.breakerTriggered = Boolean(current.breakerTriggered || this.engine.circuitBreakerTriggered);
       if (isNewScan) {
         const markets = Array.isArray(scanner.markets) ? scanner.markets : [];
@@ -603,19 +597,28 @@ export class TelegramReportService {
 
     await Promise.all([
       update(`reportmetrics:h:${new Date(hour.startMs).toISOString().slice(0, 13)}`),
-      update(`reportmetrics:d:${formatUtcDay(day)}`),
+      update(`reportmetrics:d:bdt:${formatBangladeshDay(bdtDay)}`),
     ]);
     if (isNewScan) await dbSaveSettings("telegram:scanner:lastObserved", { lastScanTime: scanner.lastScanTime });
   }
 
-  private async captureBoundarySnapshot(now: number) {
-    const date = new Date(now);
-    const dayStart = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
-    if (now - dayStart > 60_000) return;
-    const key = `reportaccount:${new Date(dayStart).toISOString().slice(0, 10)}`;
-    if (await dbGetSettings(key)) return;
+  private async captureBangladeshBoundarySnapshot(now: number) {
+    const day = currentBangladeshDay(now);
+    const existing = await dbGetAccountSnapshot(day.startMs, REPORTING_TIMEZONE);
+    if (existing.ok && existing.row) return;
     const account = await this.accountSnapshot();
     if (account.errors.length) return;
-    await dbSaveSettings(key, { ...account.snapshot, reliableBoundary: true });
+    const reliableBoundary = snapshotReliability(day.startMs, account.snapshot.capturedAt);
+    await dbSaveAccountSnapshot({
+      boundaryMs: day.startMs,
+      reportingDate: formatBangladeshDay(day),
+      timezone: REPORTING_TIMEZONE,
+      wallet: account.snapshot.wallet,
+      equity: account.snapshot.equity,
+      available: account.snapshot.available,
+      capturedAt: account.snapshot.capturedAt,
+      source: "bybit-unified-live",
+      reliableBoundary,
+    });
   }
 }
