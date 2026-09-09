@@ -18,6 +18,58 @@ export interface Settings {
   demoTrading?: boolean;
 }
 
+export type RuntimeHealthStatus = "healthy" | "degraded" | "unavailable" | "connecting" | "disconnected";
+
+export interface RuntimeRiskStatus {
+  leverage: number;
+  marginCapUsdt: number;
+  approximateMaxNotionalUsdt: number;
+  maxPositions: number;
+  scannerMaxConcurrent: number;
+  duplicateSymbolPolicy: "DENY_SAME_SYMBOL";
+  cooldown: {
+    symbolMs: number;
+    description: string;
+  };
+  dailyLossBreaker: {
+    limitUsdt: number;
+    active: boolean;
+    scope: "NEW_ENTRIES_ONLY";
+  };
+  consecutiveLossBreaker: {
+    losses: number;
+    pauseMs: number;
+    active: boolean;
+    until: number | null;
+  };
+  stopLossDiscipline: {
+    mode: "ADAPTIVE_ATR_STRUCTURE";
+    minInitialDistancePercent: number;
+    maxInitialDistancePercent: number;
+    breakEvenAtrMultiple: number;
+    neverWiden: boolean;
+  };
+  botRunning: boolean;
+  scannerRunning: boolean;
+  autoTrade: boolean;
+  breakerActive: boolean;
+  breakerReason: string | null;
+  bybitPrivateApiHealth: {
+    healthy: boolean;
+    status: RuntimeHealthStatus;
+    lastError: string | null;
+  };
+  bybitPrivateWsHealth: {
+    healthy: boolean;
+    status: RuntimeHealthStatus;
+    connected: boolean;
+    authenticated: boolean;
+    lastMessageAt: number | null;
+    lastError: string | null;
+  };
+  lastSuccessfulRiskDataRefresh: number | null;
+}
+
 export interface Position {
   symbol: string;
   side: "Buy" | "Sell" | string;
@@ -26,6 +78,7 @@ export interface Position {
   avgPrice?: string | number;
   markPrice?: string | number;
   leverage: number | string;
+  positionIdx?: number;
   unrealizedPnl?: number;
   unrealisedPnl?: string | number;
   curRealisedPnl?: string;
@@ -73,6 +126,7 @@ export interface ServerToClientEvents {
   "price-update": (prices: Record<string, number>) => void;
   "technicals-update": (technicals: Record<string, Technicals>) => void;
   "trade-event": (trade: TradeHistory) => void;
+  "runtime-status": (status: RuntimeRiskStatus) => void;
   "log": (message: string) => void;
 }
 
