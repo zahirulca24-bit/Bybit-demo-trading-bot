@@ -36,7 +36,6 @@ export function StrategyPage({
   onToggleAutoTrade,
   onScanNow,
   onRefreshMarkets,
-  onSetMaxConcurrent,
   onQuickBuy,
 }: StrategyPageProps) {
   const [selectedSymbol, setSelectedSymbol] = useState<string>("BTCUSDT");
@@ -136,7 +135,7 @@ export function StrategyPage({
       )}
 
       {activeTab === "turnover" && (
-        <MarketScannerTable scannerState={scannerState} activePositions={activePositions} selectedSymbol={activeSymbol} onSelectSymbol={setSelectedSymbol} onToggleAutoTrade={onToggleAutoTrade} onScanNow={onScanNow} onRefreshMarkets={onRefreshMarkets} onSetMaxConcurrent={onSetMaxConcurrent} onQuickBuy={onQuickBuy} />
+        <MarketScannerTable scannerState={scannerState} activePositions={activePositions} selectedSymbol={activeSymbol} onSelectSymbol={setSelectedSymbol} onToggleAutoTrade={onToggleAutoTrade} onScanNow={onScanNow} onRefreshMarkets={onRefreshMarkets} onQuickBuy={onQuickBuy} />
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
