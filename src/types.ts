@@ -92,7 +92,7 @@ export interface ScannedMarketItem {
   symbol: string; price?: number; lastPrice: number; turnover24h: number; volume24h: number; price24hPcnt: number; highPrice24h: number; lowPrice24h: number;
   rsi: number; ema9: number; ema21: number;
   trend15m: "Bullish HTF" | "Bearish HTF" | "Neutral HTF";
-  spreadPcnt: number; atrPcnt: number; oiPositive: boolean; gatePassed: number;
+  spreadPcnt: number; atr?: number; atrPcnt: number; oiPositive: boolean; oiChangePercent?: number; breakoutBonus?: boolean; entryCandleDirection?: "Bullish" | "Bearish" | "Doji"; gatePassed: number;
   trend: "Bullish" | "Bearish" | "Neutral";
   signal: "BUY_SIGNAL" | "WAITING" | "IN_POSITION" | "SELL_SIGNAL";
   signalReason: string; lastScannedAt: number;
@@ -113,11 +113,11 @@ export interface GateResultSummary {
   gate3_spread: GateValidationResult; // Bid-Ask Spread <= 0.08%
   gate4_atr: GateValidationResult; // ATR 0.30%–1.20%
   gate5_oi: GateValidationResult; // Real Bybit 1h OI expansion >= +0.50%; unavailable fails closed
-  gate6_rsi: GateValidationResult; // RSI Long 52–62 / Short 38–48 on confirmed candle
+  gate6_rsi: GateValidationResult; // RSI Long 50–64 / Short 36–50 on confirmed candle
   passedAll: boolean; failedGateNumber: number | null; failedGateName: string | null;
 }
 
-export type RsiZone5m = "Long (52-62)" | "Short (38-48)" | "Overbought (>62)" | "Oversold (<38)" | "Neutral";
+export type RsiZone5m = "Long (50-64)" | "Short (36-50)" | "Overbought (>64)" | "Oversold (<36)" | "Neutral";
 
 export interface PipelineScannedSymbol {
   symbol: string; price: number; turnover24h: number; turnoverFormatted: string;
@@ -147,6 +147,11 @@ export interface ClosedTradeAuditItem {
   pnl: number;
   pnlPercent: number;
   exitTrigger: string;
+  classifiedBy?: string;
+  matchedOrderId?: string;
+  matchedOrderLinkId?: string;
+  rawStopOrderType?: string;
+  rawCreateType?: string;
   time: number;
   openedTime?: number;
   slDiagnosticReason?: string;

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Activity, CheckCircle2, AlertCircle, Flame, RefreshCw, Send, ShieldAlert, ShieldCheck, Sliders, Terminal as TerminalIcon, Trash2, Wifi } from "lucide-react";
 import { Settings } from "../types";
 
@@ -130,6 +130,6 @@ export function SettingsPage({ settings, updateSetting, systemLogs = [] }: Setti
   );
 }
 
-function SettingInput({ label, value, min, max, step, onChange, icon }: { label: string; value: number; min: number; max: number; step: number; onChange: (value: number) => void; icon: React.ReactNode }) {
+function SettingInput({ label, value, min, max, step, onChange, icon }: { label: string; value: number; min: number; max: number; step: number; onChange: (value: number) => void; icon: ReactNode }) {
   return <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-4"><label className="text-xs text-neutral-300 flex items-center gap-2 mb-2">{icon}{label}</label><input type="number" min={min} max={max} step={step} value={value} onChange={e => onChange(Number(e.target.value))} className="w-full bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white" /></div>;
 }

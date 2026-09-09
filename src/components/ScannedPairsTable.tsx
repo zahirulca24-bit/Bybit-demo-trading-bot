@@ -33,7 +33,7 @@ export function ScannedPairsTable({ symbols, selectedSymbol, onSelectSymbol, onQ
   return (
     <div className="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden shadow-sm">
       <div className="p-4 border-b border-neutral-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div className="flex items-center gap-3"><Activity className="w-4 h-4 text-blue-400" /><div><h3 className="font-bold text-white text-sm">Strict 6-Gate Scanner Results</h3><p className="text-xs text-neutral-400">$25M turnover · EMA50/200 + confirmed price · 0.08% spread · ATR 0.30–1.20% · real 1h OI +0.50% · RSI 52–62 / 38–48</p></div></div>
+        <div className="flex items-center gap-3"><Activity className="w-4 h-4 text-blue-400" /><div><h3 className="font-bold text-white text-sm">Strict 6-Gate Scanner Results</h3><p className="text-xs text-neutral-400">$25M turnover · EMA50/200 + confirmed price · 0.08% spread · ATR 0.30–1.20% · real 1h OI +0.50% · RSI 50–64 / 36–50</p></div></div>
         <div className="flex flex-wrap gap-2">
           <div className="relative"><Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-500" /><input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Search pair..." className="bg-neutral-950 border border-neutral-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white w-36" /></div>
           <select value={filterAction} onChange={e => setFilterAction(e.target.value as typeof filterAction)} className="bg-neutral-950 border border-neutral-800 rounded-lg px-2 py-1.5 text-xs text-white"><option value="ALL">All</option><option value="PASSED">Passed all 6</option><option value="LONG">Long</option><option value="SHORT">Short</option></select>

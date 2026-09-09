@@ -4,7 +4,10 @@ import { TelegramNotifier } from "./TelegramNotifier";
 import { BybitWebSocketManager, KlineEventPayload, TickerEventPayload } from "./BybitWebSocketManager";
 import { MarketScanner } from "./MarketScanner";
 import { dbRecordTrade } from "../db";
+import { ATR } from "technicalindicators";
 import { getUtcDayStartMs, normalizeTimestampMs } from "../utils/utcTradingDay";
+import { classifyClosedTradeExit } from "../utils/exitClassification";
+import { calculateAdaptiveStopPlan, calculateRiskAdjustedNotional, AdaptiveStopPlan } from "../utils/adaptiveStop";
 
 export class WebSocketEmitter {
   private lastPriceEmit = 0;
@@ -78,6 +81,24 @@ export class RiskManager {
   }
 }
 
+export interface ScannerEntryQualityContext {
+  atr?: number;
+  atrPercent?: number;
+  oiExpansionPercent?: number;
+  spreadPercent?: number;
+  trendState?: string;
+  breakoutBonus?: boolean;
+  entryCandleDirection?: "Bullish" | "Bearish" | "Doji";
+}
+
+type PositionRiskState = {
+  peakPrice: number;
+  breakEvenSet: boolean;
+  initialStopLoss?: number;
+  initialRiskPercent?: number;
+  atrPercent?: number;
+};
+
 export class TradingEngine {
   private isRunning = false;
   public circuitBreakerTriggered = false;
@@ -105,7 +126,7 @@ export class TradingEngine {
     globalMaxLossUsdt: -50,
   };
 
-  private positionState: Record<string, { peakPrice: number; breakEvenSet: boolean }> = {};
+  private positionState: Record<string, PositionRiskState> = {};
   private isProcessingTrade: Record<string, boolean> = {};
   private syncTimer: NodeJS.Timeout | null = null;
   private lastRiskLogAt = 0;
@@ -182,6 +203,36 @@ export class TradingEngine {
       this.currentBalance = walletBalance;
       this.emitter.updateBalance(walletBalance);
     });
+  }
+
+  private makeCloseOrderLinkId(kind: "manual" | "trail"): string {
+    return `bot-${kind}-${Date.now().toString(36)}`;
+  }
+
+  private isCandidateStopTighter(side: "Buy" | "Sell", currentStop: number, candidateStop: number): boolean {
+    if (!(candidateStop > 0)) return false;
+    if (!(currentStop > 0)) return true;
+    return side === "Buy" ? candidateStop >= currentStop : candidateStop <= currentStop;
+  }
+
+  private async buildAdaptiveStopPlan(symbol: string, side: "Buy" | "Sell", entryPrice: number, quality?: ScannerEntryQualityContext): Promise<AdaptiveStopPlan> {
+    const klineRes = await this.bybit.getKline({ category: "linear", symbol, interval: "5", limit: 40 });
+    if (klineRes.retCode !== 0 || !klineRes.result?.list) throw new Error("Confirmed 5m candles unavailable for adaptive SL");
+    const now = Date.now();
+    const closed = [...klineRes.result.list].reverse().filter((c: any) => Number(c[0]) + 5 * 60 * 1000 <= now);
+    if (closed.length < 20) throw new Error("Insufficient confirmed 5m candles for adaptive SL");
+    const highs = closed.map((c: any) => Number(c[2]));
+    const lows = closed.map((c: any) => Number(c[3]));
+    const closes = closed.map((c: any) => Number(c[4]));
+    const atrs = ATR.calculate({ period: 14, high: highs, low: lows, close: closes });
+    const calculatedAtr = atrs[atrs.length - 1];
+    const atr = quality?.atr && quality.atr > 0 ? quality.atr : calculatedAtr;
+    if (!(atr > 0)) throw new Error("ATR unavailable for adaptive SL");
+    const recent = closed.slice(-6);
+    const swingPrice = side === "Buy"
+      ? Math.min(...recent.map((c: any) => Number(c[3])))
+      : Math.max(...recent.map((c: any) => Number(c[2])));
+    return calculateAdaptiveStopPlan({ side, entryPrice, atr, swingPrice, minDistancePercent: 1.0, maxDistancePercent: 1.8 });
   }
 
   private async ensureLeverage(symbol: string) {
@@ -298,7 +349,12 @@ export class TradingEngine {
       this.activePositions = positions;
       for (const pos of positions) {
         const price = Number(pos.markPrice || pos.avgPrice || 0);
-        if (!this.positionState[pos.symbol] && price > 0) this.positionState[pos.symbol] = { peakPrice: price, breakEvenSet: false };
+        if (!this.positionState[pos.symbol] && price > 0) {
+          const entry = Number(pos.avgPrice || price);
+          const currentStop = Number(pos.stopLoss || 0);
+          const initialRiskPercent = entry > 0 && currentStop > 0 ? Math.abs(entry - currentStop) / entry * 100 : this.settings.slPercent;
+          this.positionState[pos.symbol] = { peakPrice: price, breakEvenSet: false, initialStopLoss: currentStop || undefined, initialRiskPercent };
+        }
       }
       for (const symbol of Object.keys(this.positionState)) if (!currentSymbols.has(symbol)) delete this.positionState[symbol];
       this.emitter.updatePositions(positions);
@@ -324,17 +380,30 @@ export class TradingEngine {
       if (this.tradeHistory.some((t) => t.id === id)) return;
 
       const side = item.side === "Sell" ? "Buy" : "Sell";
-      const trade = { id, symbol, side, entryPrice, exitPrice, qty, reason: "Bybit Closed PnL", pnl, pnlPercent, time };
+      const windowStart = Math.max(0, time - 180_000);
+      const windowEnd = Math.min(Date.now(), time + 180_000);
+      const [execRes, orderRes] = await Promise.all([
+        this.bybit.getExecutionList({ category: "linear", symbol, startTime: windowStart, endTime: windowEnd, limit: 100 }).catch(() => null),
+        this.bybit.getHistoricOrders({ category: "linear", symbol, startTime: windowStart, endTime: windowEnd, limit: 100 }).catch(() => null),
+      ]);
+      const classified = classifyClosedTradeExit({
+        closedTrade: item,
+        executions: execRes?.retCode === 0 ? (execRes.result?.list || []) : [],
+        orders: orderRes?.retCode === 0 ? (orderRes.result?.list || []) : [],
+        localHistory: this.tradeHistory,
+      });
+      const trade = { id, symbol, side, entryPrice, exitPrice, qty, reason: classified.label, pnl, pnlPercent, time, exitAudit: classified };
       this.tradeHistory.unshift(trade);
       this.emitter.tradeUpdate(trade);
-      this.telegram.sendTradeClosed(symbol, exitPrice, "Bybit Closed PnL", pnl, pnlPercent);
+      this.telegram.sendTradeClosed(symbol, exitPrice, classified.label, pnl, pnlPercent);
       dbRecordTrade({
         symbol,
         side,
         entryPrice,
         exitPrice,
         status: "CLOSED",
-        exitReason: "Bybit Closed PnL",
+        exitReason: classified.label,
+        exitAudit: classified,
         realizedPnl: pnl,
         closedAt: time,
         sizeNotional: entryNotional,
@@ -388,21 +457,36 @@ export class TradingEngine {
     currentPrice: number,
     ema50: number,
     ema200: number,
-    rsi: number
+    rsi: number,
+    quality?: ScannerEntryQualityContext
   ): Promise<{ success: boolean; message: string; orderId?: string }> {
     const targetSymbol = symbol.toUpperCase();
     if (this.isProcessingTrade[targetSymbol]) return { success: false, message: `Trade already in progress for ${targetSymbol}` };
     this.isProcessingTrade[targetSymbol] = true;
 
     try {
-      const notional = this.settings.positionMarginUsdt * this.settings.leverage;
-      const pre = await this.validatePreOrder(targetSymbol, side, notional);
+      const baseNotional = this.settings.positionMarginUsdt * this.settings.leverage;
+      let targetNotional = baseNotional;
+      let pre = await this.validatePreOrder(targetSymbol, side, targetNotional);
       if (!pre.valid) return { success: false, message: pre.reason || "Risk validation failed" };
       currentPrice = pre.price;
-      const { takeProfit, stopLoss } = this.riskManager.calculateBrackets(currentPrice, this.settings.tpPercent, this.settings.slPercent, side);
+      let stopPlan = await this.buildAdaptiveStopPlan(targetSymbol, side, currentPrice, quality);
+      const riskAdjustedNotional = calculateRiskAdjustedNotional(baseNotional, stopPlan.stopDistancePercent, this.settings.slPercent);
+      if (riskAdjustedNotional < targetNotional - 0.5) {
+        targetNotional = riskAdjustedNotional;
+        pre = await this.validatePreOrder(targetSymbol, side, targetNotional);
+        if (!pre.valid) return { success: false, message: pre.reason || "Risk-adjusted sizing validation failed" };
+        currentPrice = pre.price;
+        stopPlan = await this.buildAdaptiveStopPlan(targetSymbol, side, currentPrice, quality);
+      }
+      const { takeProfit } = this.riskManager.calculateBrackets(currentPrice, this.settings.tpPercent, this.settings.slPercent, side);
+      const stopLoss = stopPlan.stopLoss.toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
+      const actualNotional = Number(pre.qty) * currentPrice;
+      const actualMargin = actualNotional / this.settings.leverage;
       await this.ensureLeverage(targetSymbol);
 
-      this.emitter.log(`⚡ [Scanner Execution] ${side === "Buy" ? "LONG" : "SHORT"} ${targetSymbol} | Margin $${this.settings.positionMarginUsdt} | Notional ~$${notional} | TP ${takeProfit} | SL ${stopLoss}`);
+      this.emitter.log(`⚡ [Scanner Execution] ${side === "Buy" ? "LONG" : "SHORT"} ${targetSymbol} | Margin cap $${this.settings.positionMarginUsdt} | Used ~$${actualMargin.toFixed(2)} | Notional ~$${actualNotional.toFixed(2)} | TP ${takeProfit} | SL ${stopLoss}`);
+      this.emitter.log(`[Trade Quality] ${targetSymbol} RSI=${rsi.toFixed(1)} ATR%=${stopPlan.atrPercent.toFixed(3)} OI=${quality?.oiExpansionPercent?.toFixed(3) ?? "N/A"}% Spread=${quality?.spreadPercent?.toFixed(3) ?? "N/A"}% Trend=${quality?.trendState ?? "N/A"} BreakoutBonus=${Boolean(quality?.breakoutBonus)} Candle=${quality?.entryCandleDirection ?? "N/A"} SL=${stopPlan.stopDistancePercent.toFixed(3)}% (${stopPlan.stopDistanceAtrMultiple.toFixed(2)} ATR) Reason=${stopPlan.reason}`);
       const orderRes = await this.bybit.submitOrder({
         category: "linear",
         symbol: targetSymbol,
@@ -418,7 +502,13 @@ export class TradingEngine {
       const orderId = orderRes.result?.orderId || `scan-${Date.now()}`;
       const position = { symbol: targetSymbol, side, size: pre.qty, avgPrice: String(currentPrice), markPrice: String(currentPrice) };
       this.activePositions.push(position);
-      this.positionState[targetSymbol] = { peakPrice: currentPrice, breakEvenSet: false };
+      this.positionState[targetSymbol] = {
+        peakPrice: currentPrice,
+        breakEvenSet: false,
+        initialStopLoss: Number(stopLoss),
+        initialRiskPercent: stopPlan.stopDistancePercent,
+        atrPercent: stopPlan.atrPercent,
+      };
       this.emitter.updatePositions(this.activePositions);
       this.telegram.sendTradeExecution(targetSymbol, side === "Buy" ? "Long (Strict Scanner)" : "Short (Strict Scanner)", currentPrice, pre.qty, takeProfit, stopLoss);
       dbRecordTrade({
@@ -426,9 +516,25 @@ export class TradingEngine {
         side,
         entryPrice: currentPrice,
         status: "OPEN",
-        sizeNotional: notional,
-        marginUsed: this.settings.positionMarginUsdt,
+        sizeNotional: actualNotional,
+        marginUsed: actualMargin,
         leverage: this.settings.leverage,
+        entryDiagnostics: {
+          rsi,
+          atr: quality?.atr ?? null,
+          atrPercent: stopPlan.atrPercent,
+          oiExpansionPercent: quality?.oiExpansionPercent ?? null,
+          spreadPercent: quality?.spreadPercent ?? null,
+          trendState: quality?.trendState ?? null,
+          breakoutBonus: Boolean(quality?.breakoutBonus),
+          entryCandleDirection: quality?.entryCandleDirection ?? null,
+          slDistancePercent: stopPlan.stopDistancePercent,
+          slDistanceAtrMultiple: stopPlan.stopDistanceAtrMultiple,
+          slReason: stopPlan.reason,
+          configuredMarginCapUsdt: this.settings.positionMarginUsdt,
+          actualMarginUsedUsdt: actualMargin,
+          actualNotionalUsdt: actualNotional,
+        },
       });
       if (!this.watchlist.includes(targetSymbol)) void this.addSymbol(targetSymbol);
       setTimeout(() => void this.syncPositions(), 800);
@@ -454,20 +560,32 @@ export class TradingEngine {
     if (isLong) state.peakPrice = Math.max(state.peakPrice, currentPrice);
     else state.peakPrice = Math.min(state.peakPrice, currentPrice);
 
-    if (pnlPercent >= 1 && !state.breakEvenSet) {
+    const breakEvenTriggerPercent = Math.max(
+      1.0,
+      state.initialRiskPercent || this.settings.slPercent,
+      (state.atrPercent || 0) * 1.25
+    );
+
+    if (pnlPercent >= breakEvenTriggerPercent && !state.breakEvenSet) {
       try {
-        await this.bybit.setTradingStop({ category: "linear", symbol, stopLoss: String(entry), slTriggerBy: "LastPrice", positionIdx: 0 });
+        const currentStop = Number(pos.stopLoss || state.initialStopLoss || 0);
+        if (this.isCandidateStopTighter(isLong ? "Buy" : "Sell", currentStop, entry)) {
+          await this.bybit.setTradingStop({ category: "linear", symbol, stopLoss: String(entry), slTriggerBy: "LastPrice", positionIdx: 0 });
+          this.emitter.log(`[${symbol}] +${breakEvenTriggerPercent.toFixed(2)}% quality threshold reached; SL tightened to break-even.`);
+        } else {
+          this.emitter.log(`[${symbol}] Break-even candidate skipped because current SL is already tighter; no widening allowed.`);
+        }
         state.breakEvenSet = true;
-        this.emitter.log(`[${symbol}] +1.0% reached; SL moved to break-even.`);
       } catch (err: any) {
         this.emitter.log(`[${symbol}] Break-even update warning: ${err.message}`);
       }
     }
 
-    if (pnlPercent < 1) return;
+    if (pnlPercent < breakEvenTriggerPercent) return;
+    const trailingDistancePercent = Math.max(this.settings.trailingStopPercent, Math.min(1.0, (state.atrPercent || 0) * 0.75));
     const trailing = isLong
-      ? state.peakPrice * (1 - this.settings.trailingStopPercent / 100)
-      : state.peakPrice * (1 + this.settings.trailingStopPercent / 100);
+      ? state.peakPrice * (1 - trailingDistancePercent / 100)
+      : state.peakPrice * (1 + trailingDistancePercent / 100);
     const triggered = isLong ? currentPrice <= trailing : currentPrice >= trailing;
     if (!triggered) return;
 
@@ -481,6 +599,7 @@ export class TradingEngine {
         qty: String(pos.size),
         reduceOnly: true,
         timeInForce: "IOC",
+        orderLinkId: this.makeCloseOrderLinkId("trail"),
       });
       if (closeRes.retCode === 0) {
         this.emitter.log(`[${symbol}] Trailing stop exit submitted.`);
@@ -571,6 +690,7 @@ export class TradingEngine {
         qty: String(pos.size),
         reduceOnly: true,
         timeInForce: "IOC",
+        orderLinkId: this.makeCloseOrderLinkId("manual"),
       });
       if (result.retCode !== 0) return { success: false, message: result.retMsg || "Bybit rejected close" };
       this.activePositions = this.activePositions.filter((p) => p.symbol !== target);
@@ -598,6 +718,7 @@ export class TradingEngine {
             qty: String(pos.size),
             reduceOnly: true,
             timeInForce: "IOC",
+            orderLinkId: this.makeCloseOrderLinkId("manual"),
           });
           const success = result.retCode === 0;
           if (success) closedCount++;

@@ -12,6 +12,7 @@ import { MarketScanner5m, Scanner5mSignal } from "./src/engine/MarketScanner5m";
 import { SixGateFilteringPipeline } from "./src/engine/SixGateFilteringPipeline";
 import { initDatabase, dbGetClosedTrades } from "./src/db";
 import { getUtcTradingDayWindow, normalizeTimestampMs } from "./src/utils/utcTradingDay";
+import { classifyClosedTradeExit } from "./src/utils/exitClassification";
 
 dotenv.config();
 
@@ -253,7 +254,7 @@ async function startServer() {
       if (side && qty) {
         const closeSide = side === "Buy" ? "Sell" : "Buy";
         const orderRes = await bybit.submitOrder({
-          category: "linear", symbol: targetSymbol, side: closeSide, orderType: "Market", qty: qty.toString(), reduceOnly: true, timeInForce: "IOC",
+          category: "linear", symbol: targetSymbol, side: closeSide, orderType: "Market", qty: qty.toString(), reduceOnly: true, timeInForce: "IOC", orderLinkId: `app-manual-${Date.now().toString(36)}`,
         });
         if (orderRes.retCode === 0) {
           engine.emitter.log(`[Manual Close] Closed ${targetSymbol} position (${qty} contracts)`);
@@ -372,10 +373,11 @@ async function startServer() {
       const nowMs = Date.now();
       const { startMs: dayStartMs, endMs: dayEndMs } = getUtcTradingDayWindow(nowMs);
 
-      const [posRes, pnlResponse, execResponse] = await Promise.all([
+      const [posRes, pnlResponse, execResponse, orderHistoryResponse] = await Promise.all([
         bybit.getPositionInfo({ category: "linear", settleCoin: "USDT" }),
         bybit.getClosedPnL({ category: "linear", startTime: dayStartMs, endTime: dayEndMs, limit: 100 }),
         bybit.getExecutionList({ category: "linear", startTime: dayStartMs, endTime: dayEndMs, limit: 100 }),
+        bybit.getHistoricOrders({ category: "linear", startTime: dayStartMs, endTime: dayEndMs, limit: 100 }).catch(() => null),
       ]);
 
       const openPositions = (posRes.result?.list || []).filter((p: any) => parseFloat(p.size || "0") > 0);
@@ -383,6 +385,7 @@ async function startServer() {
       const maxSlots = engine.settings.maxPositions || 3;
       const rawClosedList = pnlResponse.result?.list || [];
       const rawExecutions = execResponse.result?.list || [];
+      const rawOrderHistory = orderHistoryResponse?.retCode === 0 ? (orderHistoryResponse.result?.list || []) : [];
       const engineHistory = engine.getHistory() || [];
 
       const closedTodayRaw = rawClosedList.filter((item: any) => {
@@ -393,22 +396,10 @@ async function startServer() {
         const execTime = normalizeTimestampMs(exec.execTime);
         return execTime >= dayStartMs && execTime <= dayEndMs && String(exec.execType || "Trade") === "Trade";
       });
-
-      type ExitCategory = "TP" | "SL" | "TRAILING" | "MANUAL" | "OTHER";
-      const classifyExit = (reasonValue: unknown, stopOrderTypeValue: unknown): { category: ExitCategory; label: string } => {
-        const stopOrderType = String(stopOrderTypeValue || "").toLowerCase();
-        if (stopOrderType.includes("trailing")) return { category: "TRAILING", label: "Trailing Stop" };
-        if (stopOrderType.includes("takeprofit") || stopOrderType.includes("partialtakeprofit")) return { category: "TP", label: "Take Profit" };
-        if (stopOrderType.includes("stoploss") || stopOrderType.includes("partialstoploss")) return { category: "SL", label: "Stop Loss" };
-
-        const reason = String(reasonValue || "").trim();
-        const normalized = reason.toLowerCase();
-        if (normalized.includes("trailing")) return { category: "TRAILING", label: "Trailing Stop" };
-        if (normalized.includes("take profit") || /(^|\b)tp(\b|\d)/i.test(reason)) return { category: "TP", label: "Take Profit" };
-        if (normalized.includes("stop loss") || /(^|\b)sl(\b|\d)/i.test(reason)) return { category: "SL", label: "Stop Loss" };
-        if (normalized.includes("manual") || normalized.includes("panic")) return { category: "MANUAL", label: "Manual Close" };
-        return { category: "OTHER", label: reason && normalized !== "bybit closed pnl" ? reason : "Unknown / Other" };
-      };
+      const ordersToday = rawOrderHistory.filter((order: any) => {
+        const orderTime = normalizeTimestampMs(order.updatedTime || order.createdTime);
+        return orderTime >= dayStartMs && orderTime <= dayEndMs;
+      });
 
       const dailyCounters = { tp: 0, sl: 0, trailing: 0, manual: 0, other: 0, wins: 0, losses: 0 };
       const slCountsBySymbol: Record<string, number> = {};
@@ -422,13 +413,12 @@ async function startServer() {
           ? ((exitPrice - entryPrice) / entryPrice) * 100 * (item.side === "Buy" ? -1 : 1)
           : 0;
 
-        const matchedLocal = engineHistory.find((h: any) =>
-          h.symbol === item.symbol && Math.abs(normalizeTimestampMs(h.time) - closeTime) < 30_000
-        );
-        const matchedExecution = executionsToday.find((exec: any) =>
-          item.orderId && exec.orderId === item.orderId
-        );
-        const classified = classifyExit(matchedLocal?.reason, matchedExecution?.stopOrderType);
+        const classified = classifyClosedTradeExit({
+          closedTrade: item,
+          executions: executionsToday,
+          orders: ordersToday,
+          localHistory: engineHistory,
+        });
 
         if (classified.category === "TP") dailyCounters.tp++;
         else if (classified.category === "SL") {
@@ -451,6 +441,11 @@ async function startServer() {
           pnl,
           pnlPercent,
           exitTrigger: classified.label,
+          classifiedBy: classified.classifiedBy,
+          matchedOrderId: classified.matchedOrderId,
+          matchedOrderLinkId: classified.matchedOrderLinkId,
+          rawStopOrderType: classified.rawStopOrderType,
+          rawCreateType: classified.rawCreateType,
           time: closeTime,
         };
       });

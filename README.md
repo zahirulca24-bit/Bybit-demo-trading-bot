@@ -118,3 +118,22 @@ The local server runs on `http://localhost:3000` by default.
 5. Render builds with `npm ci && npm run build` and starts with `npm start`.
 
 For safety, use a Bybit API key restricted to Demo Trading and keep withdrawal permissions disabled. Sensitive endpoints are protected when `APP_SECRET` is configured.
+
+
+## Exit Audit & Trade Quality — 2026-09-09
+
+**Updated:** Wednesday, 09 September 2026 — 02:45 PM (Asia/Dhaka)
+
+### Exit classification
+
+Daily closed trades are classified from real exchange/order metadata, never from PnL sign. Correlation uses exact `orderId`/`orderLinkId` first, then symbol, close-time proximity, reduce-only/closed-size evidence and quantity proximity. Classification precedence is **exact Stop Loss → exact Take Profit → exact Trailing Stop → explicit app/user Manual close → Other / Unknown**. `stopOrderType` and `createType` are preferred; explicit app close orders carry `bot-manual-*` or `bot-trail-*` link IDs. `Unknown / Other` remains the fallback when Bybit does not expose enough reliable metadata. Audit fields include `classifiedBy`, matched order/link IDs and raw stop/create types when available.
+
+### Entry quality and adaptive stop
+
+The strict six-gate eligibility remains: **$25M turnover**, **EMA50/EMA200 direction + confirmed price on the correct side of EMA50**, **spread <= 0.08%**, **ATR 0.30%–1.20%**, **real Bybit 1h OI expansion >= +0.50% (unavailable fails closed)**, and confirmed 5m candle agreement. RSI is rebalanced to **Long 50–64 / Short 36–50**. Breakout remains a **soft scoring/confirmation bonus only**, never a hard gate.
+
+Automated entries now use a deterministic ATR/structure-aware stop. ATR multiplier interpolates from **1.20x at 0.30% ATR to 1.50x at 1.20% ATR**. The structure candidate is the confirmed **6-candle swing low/high plus a 0.15 ATR buffer**. The initial stop uses the farther protective candidate, is never tighter than the legacy **1.00%** noise tolerance, and is capped at **1.80%** maximum distance. When the stop is wider than 1%, notional is reduced from the normal ~$500 so gross price-risk does not exceed the previous `$500 × 1% ≈ $5` envelope; the configured **$50 margin remains a cap**, leverage stays **10x**, and quantity is never increased above the normal ~$500 notional.
+
+Break-even and app-managed trailing are delayed until favorable movement reaches the maximum of **1.00%**, **1.0R (initial stop distance)**, or **1.25× ATR%**. Trailing retrace distance is `max(0.50%, min(1.00%, 0.75×ATR%))`. Both mechanisms only tighten risk; SL is never widened after placement.
+
+There is **no daily trade-count target or arbitrary max-trades-per-day cap**. The objective is to reduce avoidable wick/poor-entry stop-outs while preserving valid opportunity flow. Existing safety controls remain unchanged: max **3** positions, same-symbol **10m** cooldown, daily UTC net PnL **<= -$50** blocks new entries only, **3 consecutive losses = 30m** pause, and existing positions continue to be managed while the daily breaker blocks entries.
