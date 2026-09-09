@@ -16,7 +16,8 @@ export interface ScannerTradeExecutor {
     currentPrice: number,
     ema50: number,
     ema200: number,
-    rsi: number
+    rsi: number,
+    quality?: { atr?: number; atrPercent?: number; oiExpansionPercent?: number; spreadPercent?: number; trendState?: string; breakoutBonus?: boolean; entryCandleDirection?: "Bullish" | "Bearish" | "Doji" }
   ) => Promise<{ success: boolean; message: string; orderId?: string }>;
 }
 
@@ -158,7 +159,8 @@ export class MarketScanner {
       const atrList = ATR.calculate({ period: 14, high: highs5m, low: lows5m, close: closes5m });
       const rsiList = RSI.calculate({ period: 14, values: closes5m });
       if (!atrList.length || !rsiList.length || !confirmed5mPrice) return null;
-      const atrPcnt = (atrList[atrList.length - 1] / confirmed5mPrice) * 100;
+      const currentAtr = atrList[atrList.length - 1];
+      const atrPcnt = (currentAtr / confirmed5mPrice) * 100;
       if (gatePassed === 3 && atrPcnt >= this.minAtrPercent && atrPcnt <= this.maxAtrPercent) gatePassed = 4;
       const oiPositive = oiMetric.available && oiMetric.changePercent >= this.minOiExpansionPercent;
       if (gatePassed === 4 && oiPositive) gatePassed = 5;
@@ -175,12 +177,13 @@ export class MarketScanner {
       const shortSoftConfirmed = latestClose < previousClose && latestClose < latestOpen;
       const breakoutBonusLong = latestClose > Number(previousCandle?.[2] || 0);
       const breakoutBonusShort = latestClose < Number(previousCandle?.[3] || 0);
+      const entryCandleDirection: "Bullish" | "Bearish" | "Doji" = latestClose > latestOpen ? "Bullish" : latestClose < latestOpen ? "Bearish" : "Doji";
 
-      if (gatePassed === 5 && trend15m === "Bullish HTF" && currentRsi >= 52 && currentRsi <= 62 && longSoftConfirmed) {
+      if (gatePassed === 5 && trend15m === "Bullish HTF" && currentRsi >= 50 && currentRsi <= 64 && longSoftConfirmed) {
         gatePassed = 6;
         signal = "BUY_SIGNAL";
         signalReason = `Grade A Long: RSI ${currentRsi.toFixed(1)} | bullish close confirmation${breakoutBonusLong ? " + breakout bonus" : ""}`;
-      } else if (gatePassed === 5 && trend15m === "Bearish HTF" && currentRsi >= 38 && currentRsi <= 48 && shortSoftConfirmed) {
+      } else if (gatePassed === 5 && trend15m === "Bearish HTF" && currentRsi >= 36 && currentRsi <= 50 && shortSoftConfirmed) {
         gatePassed = 6;
         signal = "SELL_SIGNAL";
         signalReason = `Grade A Short: RSI ${currentRsi.toFixed(1)} | bearish close confirmation${breakoutBonusShort ? " + breakdown bonus" : ""}`;
@@ -207,8 +210,12 @@ export class MarketScanner {
         trend: trend15m === "Bullish HTF" ? "Bullish" : trend15m === "Bearish HTF" ? "Bearish" : "Neutral",
         trend15m,
         spreadPcnt,
+        atr: currentAtr,
         atrPcnt,
         oiPositive,
+        oiChangePercent: oiMetric.changePercent,
+        breakoutBonus: trend15m === "Bullish HTF" ? breakoutBonusLong : trend15m === "Bearish HTF" ? breakoutBonusShort : false,
+        entryCandleDirection,
         gatePassed,
         signal,
         signalReason,
@@ -229,7 +236,15 @@ export class MarketScanner {
       const side: "Buy" | "Sell" = item.signal === "SELL_SIGNAL" ? "Sell" : "Buy";
       const price = item.price || item.lastPrice;
       this.emitter.log(`⚡ [Strict Scanner] ${side === "Buy" ? "LONG" : "SHORT"} ${item.symbol} | Slot ${this.executor.activePositions.length + 1}/${this.executor.settings?.maxPositions || 3} | RSI ${item.rsi.toFixed(1)}`);
-      const result = await this.executor.executeScannerEntry(item.symbol, side, price, item.ema9, item.ema21, item.rsi);
+      const result = await this.executor.executeScannerEntry(item.symbol, side, price, item.ema9, item.ema21, item.rsi, {
+        atr: item.atr,
+        atrPercent: item.atrPcnt,
+        oiExpansionPercent: item.oiChangePercent,
+        spreadPercent: item.spreadPcnt,
+        trendState: item.trend15m,
+        breakoutBonus: item.breakoutBonus,
+        entryCandleDirection: item.entryCandleDirection,
+      });
       if (result.success) this.telegram.sendScannerSignal(item.symbol, price, item.rsi, item.ema9, item.ema21, true);
     }
   }

@@ -113,7 +113,7 @@ export function StrategyPage({
     {
       gateNumber: 6,
       name: "5m RSI (14)",
-      ruleDescription: "Gate 6: RSI Long 52–62 / Short 38–48 on confirmed candle",
+      ruleDescription: "Gate 6: RSI Long 50–64 / Short 36–50 on confirmed candle",
       status: "Active" as const,
       inputCount: 9,
       passCount: 3,
@@ -206,7 +206,7 @@ export function StrategyPage({
               <ul className="space-y-2 text-neutral-300">
                 <li><strong className="text-blue-400">Gate 4:</strong> ATR 0.30%–1.20%</li>
                 <li><strong className="text-blue-400">Gate 5:</strong> Bybit real 1h OI expansion &gt;= +0.50%; unavailable = fail</li>
-                <li><strong className="text-blue-400">Gate 6:</strong> RSI Long 52–62 / Short 38–48 on confirmed candle</li>
+                <li><strong className="text-blue-400">Gate 6:</strong> RSI Long 50–64 / Short 36–50 on confirmed candle</li>
               </ul>
             </div>
           </div>

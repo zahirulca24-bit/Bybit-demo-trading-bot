@@ -28,6 +28,8 @@ class InMemoryStore {
     exitReason?: string;
     realizedPnl?: number;
     closedAt?: number;
+    entryDiagnostics?: Record<string, any>;
+    exitAudit?: Record<string, any>;
   }) {
     const existingIndex = this.trades.findIndex(t => t.symbol === trade.symbol && t.status === 'OPEN');
     if (trade.status === 'OPEN') {
@@ -48,7 +50,8 @@ class InMemoryStore {
           status: 'CLOSED',
           exit_reason: trade.exitReason,
           realized_pnl: trade.realizedPnl,
-          closed_at: trade.closedAt ? new Date(trade.closedAt).toISOString() : new Date().toISOString()
+          closed_at: trade.closedAt ? new Date(trade.closedAt).toISOString() : new Date().toISOString(),
+          exitAudit: trade.exitAudit
         };
       } else {
         this.trades.unshift({
@@ -56,7 +59,8 @@ class InMemoryStore {
           ...trade,
           status: 'CLOSED',
           opened_at: new Date().toISOString(),
-          closed_at: trade.closedAt ? new Date(trade.closedAt).toISOString() : new Date().toISOString()
+          closed_at: trade.closedAt ? new Date(trade.closedAt).toISOString() : new Date().toISOString(),
+          exitAudit: trade.exitAudit
         });
       }
     }
@@ -104,8 +108,13 @@ export async function initDatabase() {
         exit_reason VARCHAR(50),
         realized_pnl NUMERIC(16, 4),
         opened_at TIMESTAMPTZ DEFAULT NOW(),
-        closed_at TIMESTAMPTZ
+        closed_at TIMESTAMPTZ,
+        entry_diagnostics JSONB,
+        exit_audit JSONB
       );
+
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS entry_diagnostics JSONB;
+      ALTER TABLE trades ADD COLUMN IF NOT EXISTS exit_audit JSONB;
 
       CREATE TABLE IF NOT EXISTS bot_settings (
         key VARCHAR(50) PRIMARY KEY,
@@ -140,6 +149,8 @@ export async function dbRecordTrade(trade: {
   exitReason?: string;
   realizedPnl?: number;
   closedAt?: number;
+  entryDiagnostics?: Record<string, any>;
+  exitAudit?: Record<string, any>;
 }) {
   if (!isConnected || !pool) {
     await memoryStore.recordTrade(trade);
@@ -152,15 +163,16 @@ export async function dbRecordTrade(trade: {
       const check = await pool.query("SELECT id FROM trades WHERE symbol = $1 AND status = 'OPEN'", [trade.symbol]);
       if (check.rows.length === 0) {
         await pool.query(
-          `INSERT INTO trades (symbol, side, entry_price, size_notional, margin_used, leverage, status)
-           VALUES ($1, $2, $3, $4, $5, $6, 'OPEN')`,
+          `INSERT INTO trades (symbol, side, entry_price, size_notional, margin_used, leverage, status, entry_diagnostics)
+           VALUES ($1, $2, $3, $4, $5, $6, 'OPEN', $7)`,
           [
             trade.symbol,
             trade.side,
             trade.entryPrice,
             trade.sizeNotional || 1000.0,
             trade.marginUsed || 100.0,
-            trade.leverage || 10
+            trade.leverage || 10,
+            trade.entryDiagnostics ? JSON.stringify(trade.entryDiagnostics) : null
           ]
         );
       }
@@ -170,13 +182,14 @@ export async function dbRecordTrade(trade: {
       // Update existing open or insert if missing
       const updateRes = await pool.query(
         `UPDATE trades 
-         SET exit_price = $1, status = 'CLOSED', exit_reason = $2, realized_pnl = $3, closed_at = $4
-         WHERE symbol = $5 AND status = 'OPEN'`,
+         SET exit_price = $1, status = 'CLOSED', exit_reason = $2, realized_pnl = $3, closed_at = $4, exit_audit = $5
+         WHERE symbol = $6 AND status = 'OPEN'`,
         [
           trade.exitPrice || 0,
           trade.exitReason || 'Manual',
           trade.realizedPnl || 0,
           closedTime,
+          trade.exitAudit ? JSON.stringify(trade.exitAudit) : null,
           trade.symbol
         ]
       );
@@ -184,8 +197,8 @@ export async function dbRecordTrade(trade: {
       if (updateRes.rowCount === 0) {
         // Insert closed trade directly if no open record was found
         await pool.query(
-          `INSERT INTO trades (symbol, side, entry_price, exit_price, size_notional, margin_used, leverage, status, exit_reason, realized_pnl, closed_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, 'CLOSED', $8, $9, $10)`,
+          `INSERT INTO trades (symbol, side, entry_price, exit_price, size_notional, margin_used, leverage, status, exit_reason, realized_pnl, closed_at, exit_audit)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'CLOSED', $8, $9, $10, $11)`,
           [
             trade.symbol,
             trade.side,
@@ -196,7 +209,8 @@ export async function dbRecordTrade(trade: {
             trade.leverage || 10,
             trade.exitReason || 'Manual',
             trade.realizedPnl || 0,
-            closedTime
+            closedTime,
+            trade.exitAudit ? JSON.stringify(trade.exitAudit) : null
           ]
         );
       }
@@ -214,7 +228,7 @@ export async function dbGetClosedTrades() {
 
   try {
     const res = await pool.query(
-      `SELECT id, symbol, side, entry_price, exit_price, size_notional, margin_used, leverage, status, exit_reason, realized_pnl, opened_at, closed_at
+      `SELECT id, symbol, side, entry_price, exit_price, size_notional, margin_used, leverage, status, exit_reason, realized_pnl, opened_at, closed_at, entry_diagnostics, exit_audit
        FROM trades
        WHERE status = 'CLOSED'
        ORDER BY closed_at DESC`
@@ -228,7 +242,9 @@ export async function dbGetClosedTrades() {
       qty: (parseFloat(row.size_notional) / parseFloat(row.entry_price)).toFixed(3),
       pnl: parseFloat(row.realized_pnl || '0'),
       pnlPercent: row.entry_price && row.exit_price ? ((parseFloat(row.exit_price) - parseFloat(row.entry_price)) / parseFloat(row.entry_price)) * 100 * (row.side === 'Sell' ? -1 : 1) : 0,
-      reason: row.exit_reason || 'Manual',
+      reason: row.exit_reason || 'Unknown / Other',
+      entryDiagnostics: row.entry_diagnostics || undefined,
+      exitAudit: row.exit_audit || undefined,
       time: row.closed_at ? new Date(row.closed_at).getTime() : Date.now()
     }));
   } catch (err: any) {

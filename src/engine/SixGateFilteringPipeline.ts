@@ -1,6 +1,6 @@
 import { RestClientV5 } from "bybit-api";
 import { EMA, RSI, ATR } from "technicalindicators";
-import { PipelineScannedSymbol, PipelineState, PipelineGateSummary, GateResultSummary } from "../types";
+import { PipelineScannedSymbol, PipelineState, PipelineGateSummary, GateResultSummary, RsiZone5m } from "../types";
 
 type Trend15m = "Bullish HTF" | "Bearish HTF" | "Neutral";
 type OiMetric = { oi: number; oiChange1h: number; timestamp: number; available: boolean };
@@ -16,7 +16,7 @@ export class SixGateFilteringPipeline {
       { gateNumber: 3, name: "Orderbook Spread", ruleDescription: "Fresh bid-ask spread <= 0.08%", status: "Filtering", inputCount: 0, passCount: 0, passRatePercent: 100 },
       { gateNumber: 4, name: "5m Volatility (ATR)", ruleDescription: "Confirmed 5m ATR between 0.30% and 1.20%", status: "Filtering", inputCount: 0, passCount: 0, passRatePercent: 100 },
       { gateNumber: 5, name: "Open Interest (OI)", ruleDescription: "Real Bybit 1h OI expansion >= +0.50%", status: "Filtering", inputCount: 0, passCount: 0, passRatePercent: 100 },
-      { gateNumber: 6, name: "5m RSI + Candle Confirmation", ruleDescription: "Long RSI 52-62 / Short RSI 38-48 on confirmed candle; breakout is bonus only", status: "Active", inputCount: 0, passCount: 0, passRatePercent: 100 },
+      { gateNumber: 6, name: "5m RSI + Candle Confirmation", ruleDescription: "Long RSI 50-64 / Short RSI 36-50 on confirmed candle; breakout is bonus only", status: "Active", inputCount: 0, passCount: 0, passRatePercent: 100 },
     ],
     symbols: [],
     lastScanTimestamp: 0,
@@ -86,7 +86,7 @@ export class SixGateFilteringPipeline {
         this.summary(3, "Orderbook Spread", "Fresh spread <= 0.08%", g2.length, g3.length),
         this.summary(4, "5m Volatility (ATR)", "Confirmed ATR 0.30%-1.20%", g3.length, g4.length),
         this.summary(5, "Open Interest (OI)", "Real 1h OI expansion >= +0.50%", g4.length, g5.length),
-        this.summary(6, "5m RSI + Candle Confirmation", "Long 52-62 / Short 38-48; breakout bonus only", g5.length, g6.length, g6.length > 0 ? "Active" : "Filtering"),
+        this.summary(6, "5m RSI + Candle Confirmation", "Long 50-64 / Short 36-50; breakout bonus only", g5.length, g6.length, g6.length > 0 ? "Active" : "Filtering"),
       ];
 
       scanned.sort((a, b) => {
@@ -181,16 +181,16 @@ export class SixGateFilteringPipeline {
       const breakoutLong = latestClose > Number(previous[2]);
       const breakoutShort = latestClose < Number(previous[3]);
 
-      let rsiZone5m: any = "Neutral";
+      let rsiZone5m: RsiZone5m = "Neutral";
       let isRsi5mValid = false;
-      if (trend15m === "Bullish HTF" && currentRsi >= 52 && currentRsi <= 62 && longConfirm) {
-        rsiZone5m = "Long (52-62)";
+      if (trend15m === "Bullish HTF" && currentRsi >= 50 && currentRsi <= 64 && longConfirm) {
+        rsiZone5m = "Long (50-64)";
         isRsi5mValid = true;
-      } else if (trend15m === "Bearish HTF" && currentRsi >= 38 && currentRsi <= 48 && shortConfirm) {
-        rsiZone5m = "Short (38-48)";
+      } else if (trend15m === "Bearish HTF" && currentRsi >= 36 && currentRsi <= 50 && shortConfirm) {
+        rsiZone5m = "Short (36-50)";
         isRsi5mValid = true;
-      } else if (currentRsi > 62) rsiZone5m = "Overbought (>62)";
-      else if (currentRsi < 38) rsiZone5m = "Oversold (<38)";
+      } else if (currentRsi > 64) rsiZone5m = "Overbought (>64)";
+      else if (currentRsi < 36) rsiZone5m = "Oversold (<36)";
 
       const isVolumeValid = turnover24h >= this.minTurnover;
       let failedGateNumber: number | null = null;
