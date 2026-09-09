@@ -238,6 +238,7 @@ export class SixGateFilteringPipeline {
         isAtrValid,
         openInterest: oi.oi,
         oiChangePercent1h: oi.available ? oi.oiChange1h : 0,
+        oiAvailable: oi.available,
         isOiValid,
         rsi14_5m: currentRsi,
         rsiZone5m,

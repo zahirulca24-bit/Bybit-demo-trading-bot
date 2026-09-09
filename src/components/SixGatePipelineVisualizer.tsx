@@ -17,9 +17,9 @@ import { PipelineGateSummary } from "../types";
 
 interface SixGatePipelineVisualizerProps {
   gates: PipelineGateSummary[];
-  totalDiscovered: number;
-  passedAllCount: number;
-  activeSignalsCount: number;
+  totalDiscovered: number | null;
+  passedAllCount: number | null;
+  activeSignalsCount: number | null;
   isScanning: boolean;
   onRefresh: () => void;
 }
@@ -36,37 +36,37 @@ export function SixGatePipelineVisualizer({
   const gateMeta: Record<number, { icon: React.ReactNode; ruleTag: string; accentColor: string; bgGlow: string }> = {
     1: {
       icon: <BarChart3 className="w-4 h-4 text-blue-400" />,
-      ruleTag: "Top USDT Perps Turnover",
+      ruleTag: "24h Turnover >= $25M",
       accentColor: "border-blue-500/40 text-blue-400",
       bgGlow: "bg-blue-500/10",
     },
     2: {
       icon: <TrendingUp className="w-4 h-4 text-cyan-400" />,
-      ruleTag: "15m HTF Trend (EMA 50/200)",
+      ruleTag: "EMA50/EMA200 + confirmed price side",
       accentColor: "border-cyan-500/40 text-cyan-400",
       bgGlow: "bg-cyan-500/10",
     },
     3: {
       icon: <Scale className="w-4 h-4 text-emerald-400" />,
-      ruleTag: "Bid-Ask Spread <= 0.15%",
+      ruleTag: "Bid-Ask Spread <= 0.08%",
       accentColor: "border-emerald-500/40 text-emerald-400",
       bgGlow: "bg-emerald-500/10",
     },
     4: {
       icon: <Activity className="w-4 h-4 text-amber-400" />,
-      ruleTag: "5m ATR Volatility >= 0.3%",
+      ruleTag: "5m ATR 0.30%–1.20%",
       accentColor: "border-amber-500/40 text-amber-400",
       bgGlow: "bg-amber-500/10",
     },
     5: {
       icon: <Zap className="w-4 h-4 text-purple-400" />,
-      ruleTag: "1h/4h Positive OI Inflow",
+      ruleTag: "Real Bybit 1h OI expansion >= +0.50%",
       accentColor: "border-purple-500/40 text-purple-400",
       bgGlow: "bg-purple-500/10",
     },
     6: {
       icon: <ShieldCheck className="w-4 h-4 text-rose-400" />,
-      ruleTag: "5m RSI (14) Entry Trigger",
+      ruleTag: "RSI Long 50–64 / Short 36–50 · confirmed candle",
       accentColor: "border-rose-500/40 text-rose-400",
       bgGlow: "bg-rose-500/10",
     },
@@ -101,8 +101,8 @@ export function SixGatePipelineVisualizer({
             Pass-through Flow:
           </span>
           <div className="flex items-center gap-1.5 font-mono text-xs font-bold text-neutral-200">
-            <span className="text-neutral-400">{totalDiscovered || 40}</span>
-            <span className="text-neutral-600">→</span>
+            <span className="text-neutral-400">{totalDiscovered ?? "—"}</span>
+            {gates.length > 0 && <span className="text-neutral-600">→</span>}
             {gates.map((gate, i) => (
               <React.Fragment key={gate.gateNumber}>
                 <span className={i === gates.length - 1 ? "text-emerald-400 font-extrabold" : "text-neutral-300"}>
@@ -112,7 +112,7 @@ export function SixGatePipelineVisualizer({
               </React.Fragment>
             ))}
             <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-sans">
-              {passedAllCount} Active Signals
+              {activeSignalsCount ?? "—"} Active Signals
             </span>
           </div>
         </div>
@@ -120,6 +120,12 @@ export function SixGatePipelineVisualizer({
 
       {/* 6 Interconnected Horizontal Gate Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-3 relative">
+        {gates.length === 0 && (
+          <div className="md:col-span-2 lg:col-span-6 rounded-xl border border-neutral-800 bg-neutral-950 p-5 text-center">
+            <p className="text-sm font-semibold text-neutral-300">Pipeline metrics unavailable</p>
+            <p className="text-xs text-neutral-500 mt-1">No counts are fabricated while the backend scan is loading or unavailable.</p>
+          </div>
+        )}
         {gates.map((gate, index) => {
           const meta = gateMeta[gate.gateNumber] || {
             icon: <Activity className="w-4 h-4 text-neutral-400" />,

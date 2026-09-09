@@ -4,7 +4,7 @@ This project runs as a Node.js web service on Render and is configured for Bybit
 
 ## Final Strict 6-Gate + Risk Rules
 
-**Last updated:** Tuesday, 08 September 2026 — Asia/Dhaka
+**Last updated:** Wednesday, 09 September 2026 — Asia/Dhaka
 
 The frontend blueprint and production runtime are aligned to these strict automated-entry rules:
 
@@ -13,13 +13,13 @@ The frontend blueprint and production runtime are aligned to these strict automa
 - **Gate 3 — Spread:** maximum **0.08%** using a fresh bid/ask check.
 - **Gate 4 — ATR:** **0.30%–1.20%**.
 - **Gate 5 — Open Interest:** **real Bybit 1h OI expansion >= +0.50%**; unavailable OI **fails closed**.
-- **Gate 6 — RSI:** **Long 52–62 / Short 38–48** on a confirmed closed candle.
+- **Gate 6 — RSI:** **Long 50–64 / Short 36–50** on a confirmed closed candle.
 - **Confirmed candles only:** entry validation uses confirmed closed candles, not an in-progress candle.
 - **Breakout:** previous high/low breakout is a **soft confirmation/scoring bonus only**, never a hard gate.
 - **Duplicate exposure:** a new entry is blocked while the same symbol already has an open position.
 - **Same-symbol cooldown:** wait **10 minutes** after a close before re-entering that symbol.
 - **Maximum concurrent positions:** **3**.
-- **Position margin:** **$50 USDT** at **10x leverage**, targeting about **$500 notional** per position.
+- **Position margin:** configured maximum **$50 USDT** at **10x leverage**; adaptive wider stops reduce notional as needed to preserve approximate gross price-risk.
 - **Daily circuit breaker:** **net daily PnL <= -$50** blocks **new entries only**.
 - **3 consecutive losses:** pause new entries for **30 minutes**.
 - **Existing positions:** continue normal management/closing while an entry breaker is active.
@@ -137,3 +137,14 @@ Automated entries now use a deterministic ATR/structure-aware stop. ATR multipli
 Break-even and app-managed trailing are delayed until favorable movement reaches the maximum of **1.00%**, **1.0R (initial stop distance)**, or **1.25× ATR%**. Trailing retrace distance is `max(0.50%, min(1.00%, 0.75×ATR%))`. Both mechanisms only tighten risk; SL is never widened after placement.
 
 There is **no daily trade-count target or arbitrary max-trades-per-day cap**. The objective is to reduce avoidable wick/poor-entry stop-outs while preserving valid opportunity flow. Existing safety controls remain unchanged: max **3** positions, same-symbol **10m** cooldown, daily UTC net PnL **<= -$50** blocks new entries only, **3 consecutive losses = 30m** pause, and existing positions continue to be managed while the daily breaker blocks entries.
+
+
+## Frontend Runtime Truth Sync — 2026-09-09
+
+The UI must display backend truth without synthetic operational values. Scanner counts, wallet/PnL, trade counts, and gate pass-through values show the real backend value (including a real `0`) or an unavailable/loading state such as `—`; the frontend does not substitute guessed counts.
+
+Strict runtime values shown in the UI are: turnover **>= $25M**, EMA50/EMA200 direction plus confirmed price on the correct side of EMA50, spread **<= 0.08%**, ATR **0.30%–1.20%**, real Bybit 1h OI expansion **>= +0.50%**, RSI **Long 50–64 / Short 36–50**, confirmed closed candles only, and breakout as a soft confirmation/scoring bonus only. Risk controls remain max **3** positions, configured margin max **$50**, **10x** leverage, **10m** same-symbol cooldown, UTC daily breaker at net PnL **<= -$50** for new entries only, and **3 consecutive losses => 30m** pause.
+
+Automated scanner SL is ATR/structure-aware: ATR14 on confirmed 5m candles, **1.20x–1.50x ATR**, recent **6** confirmed 5m candles for structure, long swing low minus **0.15×ATR**, short swing high plus **0.15×ATR**, and initial distance bounded to **1.00%–1.80%**. Wider SL reduces notional rather than increasing approximate gross price-risk. Break-even/trailing waits for `max(1.00%, initial SL distance %, 1.25×ATR%)`, starts trailing only after the same threshold, and never widens SL.
+
+Exit labels are backend-provided **TP / SL / Trailing / Manual / Other / Unknown**. `Unknown` means Bybit metadata was insufficient for reliable classification; the frontend never maps losing trades to SL or winning trades to TP. UTC daily cards use **Trading Day: UTC** and **Window: 00:00 UTC → now**. Performance Baseline remains independent from UTC daily trading statistics.

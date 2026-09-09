@@ -4,7 +4,7 @@ import { Position, TradeHistory } from "../types";
 
 interface HistoryPageProps {
   history: TradeHistory[];
-  startingBalance?: number;
+  startingBalance?: number | null;
 }
 
 interface PerformanceBaseline {
@@ -29,8 +29,8 @@ function loadBaselines(): PerformanceBaseline[] {
   }
 }
 
-export function HistoryPage({ history, startingBalance = 1000 }: HistoryPageProps) {
-  const [walletBalance, setWalletBalance] = useState(0);
+export function HistoryPage({ history, startingBalance = null }: HistoryPageProps) {
+  const [walletBalance, setWalletBalance] = useState<number | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
   const [baselines, setBaselines] = useState<PerformanceBaseline[]>(() => loadBaselines());
   const [resetting, setResetting] = useState(false);
@@ -41,7 +41,7 @@ export function HistoryPage({ history, startingBalance = 1000 }: HistoryPageProp
         fetch("/api/balance").then(r => r.json()).catch(() => ({ success: false })),
         fetch("/api/positions/active").then(r => r.json()).catch(() => ({ success: false })),
       ]);
-      if (balanceRes.success) setWalletBalance(Number(balanceRes.balance || 0));
+      if (balanceRes.success && balanceRes.balance !== undefined) setWalletBalance(Number(balanceRes.balance));
       if (positionsRes.success && Array.isArray(positionsRes.positions)) setPositions(positionsRes.positions);
     } catch {
       // Preserve the last good account snapshot if Bybit is temporarily unavailable.
@@ -57,12 +57,12 @@ export function HistoryPage({ history, startingBalance = 1000 }: HistoryPageProp
   const closedTrades = useMemo(() => history.filter(t => typeof t.pnl === "number"), [history]);
   const totalClosedPnl = useMemo(() => closedTrades.reduce((sum, t) => sum + (t.pnl || 0), 0), [closedTrades]);
   const unrealizedPnl = positions.reduce((sum, p) => sum + Number(p.unrealisedPnl ?? p.unrealizedPnl ?? 0), 0);
-  const estimatedEquity = walletBalance + unrealizedPnl;
+  const estimatedEquity = walletBalance === null ? null : walletBalance + unrealizedPnl;
   const activeBaseline = baselines.length ? baselines[baselines.length - 1] : null;
 
   const postResetTrades = activeBaseline ? closedTrades.filter(t => Number(t.time || 0) >= activeBaseline.resetAt) : closedTrades;
   const realizedSinceReset = activeBaseline ? totalClosedPnl - activeBaseline.cumulativeRealizedPnl : totalClosedPnl;
-  const netSinceReset = activeBaseline ? estimatedEquity - activeBaseline.estimatedEquity : estimatedEquity - startingBalance;
+  const netSinceReset = estimatedEquity === null ? null : activeBaseline ? estimatedEquity - activeBaseline.estimatedEquity : startingBalance === null ? null : estimatedEquity - startingBalance;
   const wins = postResetTrades.filter(t => (t.pnl || 0) > 0).length;
   const losses = postResetTrades.filter(t => (t.pnl || 0) < 0).length;
   const winRate = postResetTrades.length ? (wins / postResetTrades.length) * 100 : 0;
@@ -82,8 +82,8 @@ export function HistoryPage({ history, startingBalance = 1000 }: HistoryPageProp
     const nextReset: PerformanceBaseline = {
       resetNumber: baselines.length + 1,
       resetAt: Date.now(),
-      walletBalance,
-      estimatedEquity,
+      walletBalance: walletBalance as number,
+      estimatedEquity: estimatedEquity as number,
       cumulativeRealizedPnl: totalClosedPnl,
       cumulativeTradeCount: closedTrades.length,
     };
@@ -101,9 +101,9 @@ export function HistoryPage({ history, startingBalance = 1000 }: HistoryPageProp
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-white mb-2">Trade History & Performance Baseline</h1>
           <p className="text-neutral-400">Reset analytics to zero from a snapshot without changing Bybit balance, bot/scanner state, settings, or trade history.</p>
-          <p className="text-xs text-blue-300 mt-2">Performance Baseline is independent from UTC daily trading stats.</p>
+          <p className="text-xs text-blue-300 mt-2">Performance Baseline is independent from UTC daily trading statistics.</p>
         </div>
-        <button onClick={resetPerformanceBaseline} disabled={resetting || walletBalance <= 0} className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-2.5 text-sm font-semibold text-white">
+        <button onClick={resetPerformanceBaseline} disabled={resetting || walletBalance === null || estimatedEquity === null} className="inline-flex items-center justify-center gap-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 px-4 py-2.5 text-sm font-semibold text-white">
           {resetting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}
           Reset Performance Baseline
         </button>
@@ -124,14 +124,14 @@ export function HistoryPage({ history, startingBalance = 1000 }: HistoryPageProp
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
         <MetricCard label="Realized since reset" value={`${realizedSinceReset >= 0 ? "+" : ""}${realizedSinceReset.toFixed(2)}`} positive={realizedSinceReset >= 0} />
         <MetricCard label="Unrealized PnL" value={`${unrealizedPnl >= 0 ? "+" : ""}${unrealizedPnl.toFixed(2)}`} positive={unrealizedPnl >= 0} />
-        <MetricCard label="Net PnL since reset" value={`${netSinceReset >= 0 ? "+" : ""}${netSinceReset.toFixed(2)}`} positive={netSinceReset >= 0} />
+        <MetricCard label="Net PnL since reset" value={netSinceReset === null ? "—" : `${netSinceReset >= 0 ? "+" : ""}${netSinceReset.toFixed(2)}`} positive={netSinceReset === null ? undefined : netSinceReset >= 0} />
         <MetricCard label="Trades / W-L" value={`${postResetTrades.length} / ${wins}-${losses}`} detail={`${winRate.toFixed(1)}% win rate`} />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4"><p className="text-xs text-neutral-500">Exit counts since reset</p><p className="text-sm text-white mt-1">TP {tpCount} · SL {slCount} · Trailing {trailingCount}</p></div>
         <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4"><p className="text-xs text-neutral-500">Average PnL / trade</p><p className={`text-lg font-bold ${averagePnl >= 0 ? "text-green-500" : "text-red-500"}`}>{averagePnl >= 0 ? "+" : ""}{averagePnl.toFixed(2)} USDT</p></div>
-        <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4"><p className="text-xs text-neutral-500">Wallet / estimated equity</p><p className="text-lg font-bold text-white">${walletBalance.toFixed(2)} / ${estimatedEquity.toFixed(2)}</p></div>
+        <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4"><p className="text-xs text-neutral-500">Wallet / estimated equity</p><p className="text-lg font-bold text-white">{walletBalance === null || estimatedEquity === null ? "—" : `$${walletBalance.toFixed(2)} / $${estimatedEquity.toFixed(2)}`}</p></div>
       </div>
 
       <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4">
@@ -140,7 +140,7 @@ export function HistoryPage({ history, startingBalance = 1000 }: HistoryPageProp
           <table className="w-full text-xs whitespace-nowrap">
             <thead className="text-neutral-500"><tr><th className="text-left py-2">Baseline</th><th className="text-left py-2">Date/time</th><th className="text-right py-2">Wallet</th><th className="text-right py-2">Equity</th><th className="text-right py-2">Realized ref.</th><th className="text-right py-2">Trade ref.</th></tr></thead>
             <tbody className="divide-y divide-neutral-800">
-              <tr><td className="py-2 text-white">Before Reset</td><td className="py-2 text-neutral-500">Original account view</td><td className="text-right">${startingBalance.toFixed(2)}</td><td className="text-right">${startingBalance.toFixed(2)}</td><td className="text-right">0.00</td><td className="text-right">0</td></tr>
+              <tr><td className="py-2 text-white">Before Reset</td><td className="py-2 text-neutral-500">Original account view</td><td className="text-right">{startingBalance === null ? "—" : `$${startingBalance.toFixed(2)}`}</td><td className="text-right">{startingBalance === null ? "—" : `$${startingBalance.toFixed(2)}`}</td><td className="text-right">—</td><td className="text-right">—</td></tr>
               {baselines.map(b => <tr key={b.resetNumber}><td className="py-2 text-blue-300">Reset #{b.resetNumber}</td><td className="py-2 text-neutral-400">{new Date(b.resetAt).toLocaleString()}</td><td className="text-right">${b.walletBalance.toFixed(2)}</td><td className="text-right">${b.estimatedEquity.toFixed(2)}</td><td className="text-right">{b.cumulativeRealizedPnl.toFixed(2)}</td><td className="text-right">{b.cumulativeTradeCount}</td></tr>)}
             </tbody>
           </table>

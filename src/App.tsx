@@ -18,15 +18,16 @@ export default function App() {
   const [isCircuitBreaker, setIsCircuitBreaker] = useState(false);
   const [prices, setPrices] = useState<Record<string, number>>({});
   const [watchlist, setWatchlist] = useState<string[]>([]);
-  const [balance, setBalance] = useState<string>("0.00");
+  const [balance, setBalance] = useState<string>("");
   const [settings, setSettings] = useState<Settings>({
     leverage: 10,
-    riskUsdt: 100,
-    maxPositions: 5,
+    positionMarginUsdt: 50,
+    maxPositions: 3,
     tpPercent: 2.5,
     slPercent: 1.0,
     trailingStopPercent: 0.5,
-    maxLossUsdt: 100
+    maxLossUsdt: 50,
+    globalMaxLossUsdt: -50,
   });
   const [positions, setPositions] = useState<Position[]>([]);
   const [history, setHistory] = useState<TradeHistory[]>([]);
@@ -39,7 +40,7 @@ export default function App() {
   const [scannerState, setScannerState] = useState<ScannerState>({
     markets: [],
     autoTrade: true,
-    maxConcurrent: 2,
+    maxConcurrent: 3,
     isScanning: false,
     lastScanTime: 0,
     topSymbols: [],
@@ -97,8 +98,8 @@ export default function App() {
     newSocket.on("ticker:update", (data: Record<string, number>) => handleThrottledPrices(data));
     newSocket.on("positions-update", (data: Position[]) => setPositions(data));
     newSocket.on("position:update", (data: Position[]) => setPositions(data));
-    newSocket.on("balance-update", (data: { balance: string }) => { if (data?.balance) setBalance(data.balance); });
-    newSocket.on("wallet:update", (data: { balance: string }) => { if (data?.balance) setBalance(data.balance); });
+    newSocket.on("balance-update", (data: { balance: string }) => { if (data?.balance !== undefined) setBalance(data.balance); });
+    newSocket.on("wallet:update", (data: { balance: string }) => { if (data?.balance !== undefined) setBalance(data.balance); });
     newSocket.on("technicals-update", (data: Record<string, Technicals>) => setTechnicals(data));
     newSocket.on("watchlist-update", (data: string[]) => setWatchlist(data));
     newSocket.on("kline-update", (data: KlineUpdatePayload) => setLatestKlineUpdate(data));
@@ -124,9 +125,9 @@ export default function App() {
         fetch("/api/positions").then(r => r.json()),
         fetch("/api/watchlist").then(r => r.json()),
         fetch("/api/settings").then(r => r.json()),
-        fetch("/api/trading-summary?limit=100").then(r => r.json()).catch(() => ({ success: false })),
+        fetch("/api/history").then(r => r.json()).catch(() => ({ success: false })),
         fetch("/api/technicals").then(r => r.json()),
-        fetch('/api/bot/status').then(r => r.json()).catch(() => ({ success: true, running: true, circuitBreaker: false })),
+        fetch('/api/bot/status').then(r => r.json()).catch(() => ({ success: false })),
         fetch("/api/scanner/state").then(r => r.json()).catch(() => ({ success: false })),
       ]);
 
@@ -135,19 +136,19 @@ export default function App() {
       if (watchlistRes.success) setWatchlist(watchlistRes.watchlist);
       if (settingsRes.success) setSettings(settingsRes.settings);
 
-      if (summaryRes.success && Array.isArray(summaryRes.closedTrades)) {
-        const normalizedHistory: TradeHistory[] = summaryRes.closedTrades.map((trade: any) => ({
-          id: String(trade.orderId || `${trade.symbol}-${trade.execTime}`),
-          symbol: String(trade.symbol || ""),
+      if (summaryRes.success && Array.isArray(summaryRes.history)) {
+        const normalizedHistory: TradeHistory[] = summaryRes.history.map((trade: any) => ({
+          id: String(trade.id ?? `${trade.symbol}-${trade.time}`),
+          symbol: String(trade.symbol ?? ""),
           side: trade.side === "Sell" ? "Sell" : "Buy",
-          entryPrice: Number(trade.entryPrice || 0),
-          exitPrice: Number(trade.exitPrice || 0),
-          size: Number(trade.qty || 0),
-          qty: trade.qty ?? "0",
-          pnl: Number(trade.closedPnl || 0),
-          pnlPercent: Number(trade.closedPnlPercent || 0),
-          reason: trade.orderType || "Bybit Closed PnL",
-          time: Number(trade.execTime || 0),
+          entryPrice: Number(trade.entryPrice ?? Number.NaN),
+          exitPrice: Number(trade.exitPrice ?? Number.NaN),
+          size: Number(trade.qty ?? Number.NaN),
+          qty: trade.qty ?? "",
+          pnl: Number(trade.pnl ?? Number.NaN),
+          pnlPercent: Number(trade.pnlPercent ?? Number.NaN),
+          reason: String(trade.reason ?? "Other / Unknown"),
+          time: Number(trade.time ?? Number.NaN),
         }));
         setHistory(normalizedHistory);
       }
