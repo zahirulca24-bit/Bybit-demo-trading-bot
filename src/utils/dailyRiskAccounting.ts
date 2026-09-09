@@ -1,11 +1,13 @@
 import { normalizeTimestampMs } from "./utcTradingDay";
 import { paginateUntilBoundary } from "./tradingReports";
 
-export const RISK_DATA_UNAVAILABLE = "RISK_DATA_UNAVAILABLE";
+export const DAILY_PNL_UNAVAILABLE = "DAILY_PNL_UNAVAILABLE";
+/** @deprecated Use DAILY_PNL_UNAVAILABLE for entry-risk decisions. */
+export const RISK_DATA_UNAVAILABLE = DAILY_PNL_UNAVAILABLE;
 
 export type ClosedPnlLoadResult =
   | { ok: true; items: any[] }
-  | { ok: false; items: []; error: string };
+  | { ok: false; items: []; error: string; reason: typeof DAILY_PNL_UNAVAILABLE };
 
 export async function fetchClosedPnlRange(
   bybit: any,
@@ -23,11 +25,11 @@ export async function fetchClosedPnlRange(
           limit: 100,
           ...(cursor ? { cursor } : {}),
         });
-        if (response?.retCode !== 0) {
-          throw new Error(response?.retMsg || "Closed PnL returned non-zero retCode");
+        if (response?.retCode !== 0 || !Array.isArray(response?.result?.list)) {
+          throw new Error(response?.retMsg || "Closed PnL returned an invalid response");
         }
         return {
-          items: response?.result?.list || [],
+          items: response.result.list,
           nextCursor: response?.result?.nextPageCursor || null,
         };
       },
@@ -35,14 +37,18 @@ export async function fetchClosedPnlRange(
       (item: any) => normalizeTimestampMs(item.updatedTime || item.execTime || item.createdTime),
       maxPages,
     );
-    return { ok: true, items: items.filter((item: any) => {
-      const t = normalizeTimestampMs(item.updatedTime || item.execTime || item.createdTime);
-      return t >= startMs && t < endMs;
-    }) };
+    return {
+      ok: true,
+      items: items.filter((item: any) => {
+        const t = normalizeTimestampMs(item.updatedTime || item.execTime || item.createdTime);
+        return t >= startMs && t < endMs;
+      }),
+    };
   } catch (error: any) {
     return {
       ok: false,
       items: [],
+      reason: DAILY_PNL_UNAVAILABLE,
       error: error?.message || "Closed PnL history unavailable",
     };
   }
@@ -57,7 +63,7 @@ export function buildRiskAccounting(
   if (closedResult.ok === false) {
     return {
       available: false as const,
-      reason: RISK_DATA_UNAVAILABLE,
+      reason: DAILY_PNL_UNAVAILABLE,
       error: closedResult.error,
       closed: [] as any[],
       realized: null as number | null,
@@ -90,7 +96,7 @@ export function evaluateEntryRiskAccounting(
     return {
       allowed: false,
       breakerTriggered: false,
-      reason: `${RISK_DATA_UNAVAILABLE}${accounting.error ? `: ${accounting.error}` : ""}`,
+      reason: DAILY_PNL_UNAVAILABLE,
     };
   }
   if (Number(accounting.net) <= dailyLimit) {
