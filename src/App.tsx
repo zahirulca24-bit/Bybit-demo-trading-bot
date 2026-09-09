@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { io, Socket } from "socket.io-client";
-import { AlertCircle } from "lucide-react";
-import { Position, TradeHistory, Technicals, Settings, KlineUpdatePayload, ScannerState } from "./types";
+import { AlertCircle, Loader2 } from "lucide-react";
+import { Position, TradeHistory, Technicals, Settings, KlineUpdatePayload, ScannerState, RuntimeRiskStatus } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { TerminalPage } from "./components/TerminalPage";
 import { ActiveTradesPage } from "./components/ActiveTradesPage";
@@ -14,21 +14,11 @@ export default function App() {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<"live" | "reconnecting" | "disconnected">("reconnecting");
-  const [isBotRunning, setIsBotRunning] = useState(true);
-  const [isCircuitBreaker, setIsCircuitBreaker] = useState(false);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeRiskStatus | null>(null);
   const [prices, setPrices] = useState<Record<string, number>>({});
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [balance, setBalance] = useState<string>("");
-  const [settings, setSettings] = useState<Settings>({
-    leverage: 10,
-    positionMarginUsdt: 50,
-    maxPositions: 3,
-    tpPercent: 2.5,
-    slPercent: 1.0,
-    trailingStopPercent: 0.5,
-    maxLossUsdt: 50,
-    globalMaxLossUsdt: -50,
-  });
+  const [settings, setSettings] = useState<Settings | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
   const [history, setHistory] = useState<TradeHistory[]>([]);
   const [technicals, setTechnicals] = useState<Record<string, Technicals>>({});
@@ -39,8 +29,8 @@ export default function App() {
 
   const [scannerState, setScannerState] = useState<ScannerState>({
     markets: [],
-    autoTrade: true,
-    maxConcurrent: 3,
+    autoTrade: false,
+    maxConcurrent: 0,
     isScanning: false,
     lastScanTime: 0,
     topSymbols: [],
@@ -49,6 +39,15 @@ export default function App() {
   const pendingPricesRef = useRef<Record<string, number>>({});
   const lastPriceUpdateRef = useRef<number>(0);
   const priceTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const applyRuntimeStatus = (runtime: RuntimeRiskStatus) => {
+    setRuntimeStatus(runtime);
+    setScannerState((prev) => ({
+      ...prev,
+      autoTrade: runtime.autoTrade,
+      maxConcurrent: runtime.scannerMaxConcurrent,
+    }));
+  };
 
   const handleThrottledPrices = (data: Record<string, number>) => {
     pendingPricesRef.current = { ...pendingPricesRef.current, ...data };
@@ -89,11 +88,9 @@ export default function App() {
       setIsConnected(false);
       setConnectionStatus("reconnecting");
     });
-    newSocket.on("reconnect_attempt", () => {
-      setConnectionStatus("reconnecting");
-    });
+    newSocket.io.on("reconnect_attempt", () => setConnectionStatus("reconnecting"));
 
-    newSocket.on("bot-status", (data: { running: boolean }) => setIsBotRunning(data.running));
+    newSocket.on("runtime-status", (data: RuntimeRiskStatus) => { if (data) applyRuntimeStatus(data); });
     newSocket.on("price-update", (data: Record<string, number>) => handleThrottledPrices(data));
     newSocket.on("ticker:update", (data: Record<string, number>) => handleThrottledPrices(data));
     newSocket.on("positions-update", (data: Position[]) => setPositions(data));
@@ -104,12 +101,16 @@ export default function App() {
     newSocket.on("watchlist-update", (data: string[]) => setWatchlist(data));
     newSocket.on("kline-update", (data: KlineUpdatePayload) => setLatestKlineUpdate(data));
     newSocket.on("kline:update", (data: KlineUpdatePayload) => setLatestKlineUpdate(data));
-    newSocket.on("scanner-update", (data: ScannerState) => { if (data) setScannerState(data); });
-    newSocket.on("scanner:update", (data: ScannerState) => { if (data) setScannerState(data); });
-    newSocket.on("settings-update", (data: any) => setSettings(data));
+    newSocket.on("scanner-update", (data: ScannerState) => {
+      if (data) setScannerState((prev) => ({ ...data, autoTrade: runtimeStatus?.autoTrade ?? data.autoTrade, maxConcurrent: runtimeStatus?.scannerMaxConcurrent ?? data.maxConcurrent }));
+    });
+    newSocket.on("scanner:update", (data: ScannerState) => {
+      if (data) setScannerState((prev) => ({ ...data, autoTrade: runtimeStatus?.autoTrade ?? data.autoTrade, maxConcurrent: runtimeStatus?.scannerMaxConcurrent ?? data.maxConcurrent }));
+    });
+    newSocket.on("settings-update", (data: Settings) => setSettings(data));
     newSocket.on("log", (message: string) => setLogs((prev) => [...prev, message].slice(-50)));
-    newSocket.on("trade-update", () => fetchData());
-    newSocket.on("execution:update", () => fetchData());
+    newSocket.on("trade-update", () => void fetchData());
+    newSocket.on("execution:update", () => void fetchData());
 
     return () => {
       if (priceTimerRef.current) clearTimeout(priceTimerRef.current);
@@ -120,19 +121,19 @@ export default function App() {
   const fetchData = async () => {
     setError(null);
     try {
-      const [balanceRes, positionsRes, watchlistRes, settingsRes, summaryRes, techRes, botRes, scannerRes] = await Promise.all([
-        fetch("/api/balance").then(r => r.json()),
-        fetch("/api/positions").then(r => r.json()),
-        fetch("/api/watchlist").then(r => r.json()),
-        fetch("/api/settings").then(r => r.json()),
-        fetch("/api/history").then(r => r.json()).catch(() => ({ success: false })),
-        fetch("/api/technicals").then(r => r.json()),
-        fetch('/api/bot/status').then(r => r.json()).catch(() => ({ success: false })),
-        fetch("/api/scanner/state").then(r => r.json()).catch(() => ({ success: false })),
+      const [balanceRes, positionsRes, watchlistRes, settingsRes, summaryRes, techRes, runtimeRes, scannerRes] = await Promise.all([
+        fetch("/api/balance").then((r) => r.json()).catch(() => ({ success: false })),
+        fetch("/api/positions").then((r) => r.json()).catch(() => ({ success: false })),
+        fetch("/api/watchlist").then((r) => r.json()),
+        fetch("/api/settings").then((r) => r.json()),
+        fetch("/api/history").then((r) => r.json()).catch(() => ({ success: false })),
+        fetch("/api/technicals").then((r) => r.json()),
+        fetch("/api/runtime-status").then((r) => r.json()),
+        fetch("/api/scanner/state").then((r) => r.json()).catch(() => ({ success: false })),
       ]);
 
       if (balanceRes.success) setBalance(balanceRes.balance);
-      if (positionsRes.success) setPositions(positionsRes.positions);
+      if (positionsRes.success && Array.isArray(positionsRes.positions)) setPositions(positionsRes.positions);
       if (watchlistRes.success) setWatchlist(watchlistRes.watchlist);
       if (settingsRes.success) setSettings(settingsRes.settings);
 
@@ -154,11 +155,10 @@ export default function App() {
       }
 
       if (techRes.success) setTechnicals(techRes.technicals);
-      if (botRes?.success && typeof botRes.running === "boolean") setIsBotRunning(botRes.running);
-      if (botRes?.success && typeof botRes.circuitBreaker === "boolean") setIsCircuitBreaker(botRes.circuitBreaker);
       if (scannerRes?.success && scannerRes.state) setScannerState(scannerRes.state);
-      if (!balanceRes.success) setError(balanceRes.error);
-    } catch (err: any) {
+      if (runtimeRes?.success && runtimeRes.runtime) applyRuntimeStatus(runtimeRes.runtime);
+      if (!balanceRes.success && balanceRes.error) setError(balanceRes.error);
+    } catch {
       setError("Failed to fetch data from server");
     }
   };
@@ -172,9 +172,9 @@ export default function App() {
         body: JSON.stringify({ symbol }),
       });
       const data = await res.json();
-      if (!data.success) setError(data.message || `Failed to close position for ${symbol}`);
+      if (!data.success) setError(data.message || `Failed to submit close for ${symbol}`);
       else await fetchData();
-    } catch (err: any) {
+    } catch {
       setError(`Error submitting close order for ${symbol}`);
     }
   };
@@ -186,7 +186,7 @@ export default function App() {
       const res = await fetch("/api/test-order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol, qty: symbol.includes("BTC") ? "0.001" : undefined }),
+        body: JSON.stringify({ symbol }),
       });
       const data = await res.json();
       if (!data.success) setError(data.message || "Failed to execute manual test order");
@@ -206,7 +206,7 @@ export default function App() {
         body: JSON.stringify({ autoTrade }),
       });
       const data = await res.json();
-      if (data.success) setScannerState((prev) => ({ ...prev, autoTrade: data.autoTrade }));
+      if (data.success && data.runtime) applyRuntimeStatus(data.runtime);
     } catch {
       console.error("Failed to toggle scanner auto-trade");
     }
@@ -218,6 +218,7 @@ export default function App() {
       const res = await fetch("/api/scanner/scan-now", { method: "POST" });
       const data = await res.json();
       if (data.success && data.state) setScannerState(data.state);
+      if (data.success && data.runtime) applyRuntimeStatus(data.runtime);
     } catch {
       console.error("Failed to scan markets");
     } finally {
@@ -231,6 +232,7 @@ export default function App() {
       const res = await fetch("/api/scanner/refresh-markets", { method: "POST" });
       const data = await res.json();
       if (data.success && data.state) setScannerState(data.state);
+      if (data.success && data.runtime) applyRuntimeStatus(data.runtime);
     } catch {
       console.error("Failed to refresh market rankings");
     } finally {
@@ -246,26 +248,28 @@ export default function App() {
         body: JSON.stringify({ maxConcurrent }),
       });
       const data = await res.json();
-      if (data.success) setScannerState((prev) => ({ ...prev, maxConcurrent: data.maxConcurrent }));
+      if (data.success && data.runtime) applyRuntimeStatus(data.runtime);
     } catch {
       console.error("Failed to set max concurrent slots");
     }
   };
 
   useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 10000);
+    void fetchData();
+    const interval = setInterval(() => void fetchData(), 10000);
     return () => clearInterval(interval);
   }, []);
 
   const toggleBot = async () => {
+    if (!runtimeStatus) return;
     setIsLoading(true);
     setError(null);
     try {
-      const endpoint = isBotRunning ? "/api/bot/stop" : "/api/bot/start";
+      const endpoint = runtimeStatus.botRunning ? "/api/bot/stop" : "/api/bot/start";
       const res = await fetch(endpoint, { method: "POST" });
       const data = await res.json();
       if (!data.success) setError(data.message);
+      if (data.runtime) applyRuntimeStatus(data.runtime);
     } catch {
       setError("Failed to toggle bot");
     } finally {
@@ -278,8 +282,8 @@ export default function App() {
       const endpoint = remove ? "/api/watchlist/remove" : "/api/watchlist/add";
       const res = await fetch(endpoint, {
         method: "POST",
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol })
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol }),
       });
       const data = await res.json();
       if (data.success) setWatchlist(data.watchlist);
@@ -289,18 +293,30 @@ export default function App() {
   };
 
   const updateSetting = async (key: string, value: number) => {
-    const newSettings = { ...settings, [key]: value };
-    setSettings(newSettings);
+    if (!settings) return;
+    const requestedSettings = { ...settings, [key]: value };
     try {
-      await fetch("/api/settings", {
+      const res = await fetch("/api/settings", {
         method: "POST",
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ settings: newSettings })
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ settings: requestedSettings }),
       });
+      const data = await res.json();
+      if (data.success && data.settings) setSettings({ ...data.settings, demoTrading: settings.demoTrading });
+      if (data.success && data.runtime) applyRuntimeStatus(data.runtime);
     } catch {
       console.error("Failed to save settings");
     }
   };
+
+  if (!settings || !runtimeStatus) {
+    return (
+      <div className="min-h-screen bg-neutral-950 text-neutral-300 flex items-center justify-center gap-3">
+        <Loader2 className="w-5 h-5 animate-spin" />
+        Loading canonical runtime risk policy…
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 font-sans flex">
@@ -308,8 +324,8 @@ export default function App() {
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         isConnected={isConnected}
-        isBotRunning={isBotRunning}
-        demoTrading={settings?.demoTrading}
+        isBotRunning={runtimeStatus.botRunning}
+        demoTrading={settings.demoTrading}
         connectionStatus={connectionStatus}
       />
 
@@ -322,11 +338,12 @@ export default function App() {
             </div>
           )}
 
-          {activeTab === 'terminal' && (
+          {activeTab === "terminal" && (
             <TerminalPage
               balance={balance}
-              isBotRunning={isBotRunning}
-              isCircuitBreaker={isCircuitBreaker}
+              isBotRunning={runtimeStatus.botRunning}
+              isCircuitBreaker={runtimeStatus.breakerActive}
+              runtimeStatus={runtimeStatus}
               isLoading={isLoading}
               toggleBot={toggleBot}
               watchlist={watchlist}
@@ -340,17 +357,18 @@ export default function App() {
             />
           )}
 
-          {activeTab === 'positions' && (
+          {activeTab === "positions" && (
             <ActiveTradesPage
               positions={positions}
               settings={settings}
+              runtimeStatus={runtimeStatus}
               tradeHistory={history}
               onClosePosition={closePosition}
               onRefresh={fetchData}
             />
           )}
 
-          {activeTab === 'strategy' && (
+          {activeTab === "strategy" && (
             <StrategyPage
               watchlist={watchlist}
               technicals={technicals}
@@ -359,6 +377,7 @@ export default function App() {
               latestKlineUpdate={latestKlineUpdate}
               prices={prices}
               scannerState={scannerState}
+              runtimeStatus={runtimeStatus}
               activePositions={positions}
               onToggleAutoTrade={toggleScannerAutoTrade}
               onScanNow={triggerScanNow}
@@ -368,11 +387,12 @@ export default function App() {
             />
           )}
 
-          {activeTab === 'history' && <HistoryPage history={history} />}
+          {activeTab === "history" && <HistoryPage history={history} />}
 
-          {activeTab === 'settings' && (
+          {activeTab === "settings" && (
             <SettingsPage
               settings={settings}
+              runtimeStatus={runtimeStatus}
               updateSetting={updateSetting}
               systemLogs={logs}
             />
