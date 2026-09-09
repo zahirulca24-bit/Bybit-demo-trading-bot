@@ -16,7 +16,8 @@
     "test:quality": "tsx src/utils/tradeQuality.test.ts",
     "test:ema-timing": "tsx src/utils/emaTimingQuality.test.ts",
     "test:scanner-ui": "tsx src/utils/scannerTimingDisplay.test.ts",
-    "test:reports": "tsx src/utils/tradingReports.test.ts"
+    "test:reports": "tsx src/utils/tradingReports.test.ts",
+    "test:risk-accounting": "tsx src/utils/dailyRiskAccounting.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

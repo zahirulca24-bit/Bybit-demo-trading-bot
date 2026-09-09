@@ -3,11 +3,13 @@ import { Server as SocketIOServer } from "socket.io";
 import { TelegramNotifier } from "./TelegramNotifier";
 import { BybitWebSocketManager, KlineEventPayload, TickerEventPayload } from "./BybitWebSocketManager";
 import { MarketScanner } from "./MarketScanner";
-import { dbRecordTrade } from "../db";
+import { dbRecordReportEvent, dbRecordTrade } from "../db";
 import { ATR } from "technicalindicators";
 import { getUtcDayStartMs, normalizeTimestampMs } from "../utils/utcTradingDay";
 import { classifyClosedTradeExit } from "../utils/exitClassification";
 import { calculateAdaptiveStopPlan, calculateRiskAdjustedNotional, AdaptiveStopPlan } from "../utils/adaptiveStop";
+import { buildRiskAccounting, evaluateEntryRiskAccounting, fetchClosedPnlRange, RISK_DATA_UNAVAILABLE } from "../utils/dailyRiskAccounting";
+import { bangladeshDateForTimestamp } from "../utils/tradingReports";
 
 export class WebSocketEmitter {
   private lastPriceEmit = 0;
@@ -264,18 +266,15 @@ export class TradingEngine {
   }
 
   private async getDailyRiskSnapshot() {
-    const [positions, closedRes] = await Promise.all([
+    const now = Date.now();
+    const dayStartMs = getUtcDayStartMs(now);
+    // Preserve the rolling cross-midnight 30m loss-pause/cooldown history while accounting PnL from UTC day start.
+    const historyStartMs = Math.min(dayStartMs, now - this.consecutiveLossPauseMs);
+    const [positions, closedResult] = await Promise.all([
       this.riskManager.getOpenPositions(),
-      this.bybit.getClosedPnL({ category: "linear", limit: 100 }).catch(() => null),
+      fetchClosedPnlRange(this.bybit, historyStartMs, now + 1),
     ]);
-    const startMs = getUtcDayStartMs();
-    const closed = closedRes?.retCode === 0 ? (closedRes.result?.list || []) : [];
-    const realized = closed.reduce((sum: number, item: any) => {
-      const t = this.extractClosedTime(item);
-      return t >= startMs ? sum + Number(item.closedPnl || 0) : sum;
-    }, 0);
-    const unrealized = positions.reduce((sum: number, pos: any) => sum + Number(pos.unrealisedPnl || 0), 0);
-    return { positions, closed, realized, unrealized, net: realized + unrealized, dayStartMs: startMs };
+    return { positions, ...buildRiskAccounting(closedResult, positions, dayStartMs) };
   }
 
   public async canOpenSymbol(symbol: string): Promise<{ allowed: boolean; reason?: string }> {
@@ -293,10 +292,13 @@ export class TradingEngine {
       }
 
       const dailyLimit = -Math.abs(this.settings.maxLossUsdt || 50);
-      if (snapshot.net <= dailyLimit) {
-        this.circuitBreakerTriggered = true;
-        this.emitter.emitStatus(this.isRunning, true);
-        return { allowed: false, reason: `Daily circuit breaker active: net PnL $${snapshot.net.toFixed(2)} <= $${dailyLimit.toFixed(2)}` };
+      const riskDecision = evaluateEntryRiskAccounting(snapshot, dailyLimit);
+      if (!riskDecision.allowed) {
+        if (riskDecision.breakerTriggered) {
+          this.circuitBreakerTriggered = true;
+          this.emitter.emitStatus(this.isRunning, true);
+        }
+        return { allowed: false, reason: riskDecision.reason || RISK_DATA_UNAVAILABLE };
       }
 
       // The 3-loss pause is intentionally a rolling 30-minute rule across UTC midnight.
@@ -306,7 +308,16 @@ export class TradingEngine {
       if (lastThree.length === 3 && lastThree.every((t: any) => Number(t.closedPnl || 0) < 0)) {
         const latestClose = this.extractClosedTime(lastThree[0]);
         const remaining = this.consecutiveLossPauseMs - (Date.now() - latestClose);
-        if (remaining > 0) return { allowed: false, reason: `3-loss pause active (${Math.ceil(remaining / 60000)}m remaining)` };
+        if (remaining > 0) {
+          void dbRecordReportEvent({
+            eventKey: `loss-pause:${latestClose}`,
+            eventType: "loss_pause_trigger",
+            occurredAt: latestClose,
+            reportingDate: bangladeshDateForTimestamp(latestClose),
+            payload: { reason: "3 consecutive losses", streakCount: 3 },
+          });
+          return { allowed: false, reason: `3-loss pause active (${Math.ceil(remaining / 60000)}m remaining)` };
+        }
       }
 
       const latestForSymbol = ordered.find((t: any) => t.symbol === symbol);
@@ -330,14 +341,18 @@ export class TradingEngine {
     if (!this.isRunning) return;
     try {
       const snapshot = await this.getDailyRiskSnapshot();
+      if (!snapshot.available || !Number.isFinite(snapshot.net)) {
+        this.emitter.log(`[Risk] ${RISK_DATA_UNAVAILABLE}: ${snapshot.error || "Closed PnL history unavailable"}. New entries fail closed; existing positions remain managed.`);
+        return;
+      }
       const limit = -Math.abs(this.settings.maxLossUsdt || 50);
-      const triggered = snapshot.net <= limit;
+      const triggered = Number(snapshot.net) <= limit;
       if (triggered !== this.circuitBreakerTriggered) {
         this.circuitBreakerTriggered = triggered;
         this.emitter.emitStatus(this.isRunning, triggered);
         if (triggered) {
-          this.emitter.log(`🚨 [DAILY ENTRY BREAKER] Net daily PnL $${snapshot.net.toFixed(2)} reached $${limit.toFixed(2)}. New entries blocked; existing positions remain managed.`);
-          this.telegram.send(`🚨 <b>DAILY ENTRY BREAKER</b>\nNet daily PnL: <b>$${snapshot.net.toFixed(2)}</b>. New entries are blocked; open positions continue to be managed.`);
+          this.emitter.log(`🚨 [DAILY ENTRY BREAKER] Net daily PnL $${Number(snapshot.net).toFixed(2)} reached $${limit.toFixed(2)}. New entries blocked; existing positions remain managed.`);
+          this.telegram.send(`🚨 <b>DAILY ENTRY BREAKER</b>\nNet daily PnL: <b>$${Number(snapshot.net).toFixed(2)}</b>. New entries are blocked; open positions continue to be managed.`);
         } else {
           this.emitter.log("✅ [DAILY ENTRY BREAKER] UTC trading-day risk condition cleared; new entries may resume if all other rules pass.");
         }
@@ -415,6 +430,9 @@ export class TradingEngine {
         status: "CLOSED",
         exitReason: classified.label,
         exitAudit: classified,
+        source: "external",
+        closingOrderId: classified.matchedOrderId || item.orderId || null,
+        closingOrderLinkId: classified.matchedOrderLinkId || item.orderLinkId || null,
         realizedPnl: pnl,
         closedAt: time,
         sizeNotional: entryNotional,
@@ -527,6 +545,9 @@ export class TradingEngine {
         side,
         entryPrice: currentPrice,
         status: "OPEN",
+        source: "auto",
+        openingOrderId: orderRes.result?.orderId || orderId,
+        openingOrderLinkId: null,
         sizeNotional: actualNotional,
         marginUsed: actualMargin,
         leverage: this.settings.leverage,
@@ -774,7 +795,7 @@ export class TradingEngine {
       this.activePositions.push({ symbol: target, side: "Buy", size: qty, avgPrice: String(pre.price), markPrice: String(pre.price) });
       this.positionState[target] = { peakPrice: pre.price, breakEvenSet: false };
       this.emitter.updatePositions(this.activePositions);
-      dbRecordTrade({ symbol: target, side: "Buy", entryPrice: pre.price, status: "OPEN", sizeNotional: notional, marginUsed: this.settings.positionMarginUsdt, leverage: this.settings.leverage });
+      dbRecordTrade({ symbol: target, side: "Buy", entryPrice: pre.price, status: "OPEN", source: "manual", openingOrderId: result.result?.orderId || orderId, openingOrderLinkId: null, sizeNotional: notional, marginUsed: this.settings.positionMarginUsdt, leverage: this.settings.leverage });
       setTimeout(() => void this.syncPositions(), 800);
       return { success: true, message: `Test long placed for ${target}`, orderId };
     } catch (err: any) {
