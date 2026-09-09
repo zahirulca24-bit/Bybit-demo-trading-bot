@@ -8,8 +8,25 @@ import { ATR } from "technicalindicators";
 import { getUtcDayStartMs, normalizeTimestampMs } from "../utils/utcTradingDay";
 import { classifyClosedTradeExit } from "../utils/exitClassification";
 import { calculateAdaptiveStopPlan, calculateRiskAdjustedNotional, AdaptiveStopPlan } from "../utils/adaptiveStop";
-import { buildRiskAccounting, evaluateEntryRiskAccounting, fetchClosedPnlRange, RISK_DATA_UNAVAILABLE } from "../utils/dailyRiskAccounting";
+import { buildRiskAccounting, DAILY_PNL_UNAVAILABLE, evaluateEntryRiskAccounting, fetchClosedPnlRange } from "../utils/dailyRiskAccounting";
 import { bangladeshDateForTimestamp } from "../utils/tradingReports";
+import { RuntimeRiskStatus } from "../types";
+import {
+  InstrumentConstraints,
+  POSITION_STATE_UNAVAILABLE,
+  calculateApprovedQuantity,
+  ensureConfiguredLeverage,
+  ensureOneWayPositionMode,
+  fetchInstrumentConstraints,
+  fetchOpenPositions,
+  fetchOrderFillSnapshot,
+  fetchTopOfBook,
+  fetchUnifiedAvailableBalance,
+  mergePositionUpdates,
+  quantizePrice,
+  quantizeProtectivePrices,
+  validateFinalRequestedQuantity,
+} from "../utils/riskHardening";
 
 export class WebSocketEmitter {
   private lastPriceEmit = 0;
@@ -44,6 +61,7 @@ export class WebSocketEmitter {
   tradeUpdate(trade: any) { this.io.emit("trade-update", trade); this.io.emit("execution:update", trade); }
   updateKline(payload: { symbol: string; candle: any; ema9?: any; ema21?: any }) { this.io.emit("kline-update", payload); this.io.emit("kline:update", payload); }
   updateScanner(scannerState: any) { this.io.emit("scanner-update", scannerState); this.io.emit("scanner:update", scannerState); }
+  updateRuntimeStatus(status: RuntimeRiskStatus) { this.io.emit("runtime-status", status); }
 
   updateTechnicals(technicals: Record<string, any>) {
     this.pendingTechnicals = { ...this.pendingTechnicals, ...technicals };
@@ -65,21 +83,10 @@ export class WebSocketEmitter {
 export class RiskManager {
   constructor(private bybit: RestClientV5, private emitter: WebSocketEmitter) {}
 
-  async getOpenPositions(): Promise<any[]> {
-    try {
-      const response = await this.bybit.getPositionInfo({ category: "linear", settleCoin: "USDT" });
-      return (response.result?.list || []).filter((p: any) => Number(p.size || 0) > 0);
-    } catch (err: any) {
-      this.emitter.log(`[RiskManager] Error fetching positions: ${err.message}`);
-      return [];
-    }
-  }
-
-  calculateBrackets(price: number, tpPercent: number, slPercent: number, side: "Buy" | "Sell" = "Buy") {
-    const direction = side === "Buy" ? 1 : -1;
-    const takeProfit = (price * (1 + direction * tpPercent / 100)).toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
-    const stopLoss = (price * (1 - direction * slPercent / 100)).toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
-    return { takeProfit, stopLoss };
+  async getOpenPositions() {
+    const result = await fetchOpenPositions(this.bybit);
+    if (!result.ok) this.emitter.log(`[RiskManager] ${result.reason}: ${result.error}`);
+    return result;
   }
 }
 
@@ -112,6 +119,17 @@ type PositionRiskState = {
   atrPercent?: number;
 };
 
+type PreOrderValidation = {
+  valid: boolean;
+  qty: string;
+  qtyNumber: number;
+  price: number;
+  approvedNotional: number;
+  actualNotional: number;
+  constraints?: InstrumentConstraints;
+  reason?: string;
+};
+
 export class TradingEngine {
   private isRunning = false;
   public circuitBreakerTriggered = false;
@@ -142,9 +160,14 @@ export class TradingEngine {
   private positionState: Record<string, PositionRiskState> = {};
   private isProcessingTrade: Record<string, boolean> = {};
   private syncTimer: NodeJS.Timeout | null = null;
-  private lastRiskLogAt = 0;
   private readonly symbolCooldownMs = 10 * 60 * 1000;
   private readonly consecutiveLossPauseMs = 30 * 60 * 1000;
+  private readonly consecutiveLossCount = 3;
+  private riskBlockReason: string | null = "RISK_DATA_NOT_REFRESHED";
+  private privateApiLastError: string | null = "Risk data has not been refreshed yet";
+  private lastSuccessfulRiskDataRefresh: number | null = null;
+  private consecutiveLossUntil: number | null = null;
+  private scannerRunning = false;
 
   constructor(private bybit: RestClientV5, io: SocketIOServer, apiKey?: string, apiSecret?: string) {
     this.emitter = new WebSocketEmitter(io);
@@ -166,13 +189,16 @@ export class TradingEngine {
     await this.wsManager.init(this.watchlist);
     await this.syncPositions();
     await this.scanner.init();
+    this.scannerRunning = true;
     this.start();
+    this.emitRuntimeStatus();
     if (this.syncTimer) clearInterval(this.syncTimer);
     this.syncTimer = setInterval(() => void this.syncPositions(), 5000);
   }
 
   private setupWebSocketHandlers() {
     this.wsManager.on("log", (msg: string) => this.emitter.log(msg));
+    this.wsManager.on("status", () => this.emitRuntimeStatus());
 
     this.wsManager.on("kline", (payload: KlineEventPayload) => {
       const { symbol, candle, technicals } = payload;
@@ -184,7 +210,6 @@ export class TradingEngine {
         ema21: { time: candle.time, value: Number(technicals.ema21.toFixed(4)) },
       });
       this.emitter.updateTechnicals(this.currentTechnicals);
-      // Legacy 1m auto-entry is intentionally disabled. New entries come only from the confirmed 5m strict scanner.
     });
 
     this.wsManager.on("ticker", (payload: TickerEventPayload) => {
@@ -193,8 +218,8 @@ export class TradingEngine {
       if (this.isRunning) void this.checkTrailingStopAndBreakEven(payload.symbol, payload.price);
     });
 
-    this.wsManager.on("position", (positions: any[]) => {
-      this.activePositions = positions.filter((p) => Number(p.size || 0) > 0);
+    this.wsManager.on("position", (updates: any[]) => {
+      this.activePositions = mergePositionUpdates(this.activePositions, updates);
       this.emitter.updatePositions(this.activePositions);
     });
 
@@ -248,124 +273,146 @@ export class TradingEngine {
     return calculateAdaptiveStopPlan({ side, entryPrice, atr, swingPrice, minDistancePercent: 1.0, maxDistancePercent: 1.8 });
   }
 
-  private async ensureLeverage(symbol: string) {
-    try {
-      await this.bybit.setLeverage({
-        category: "linear",
-        symbol,
-        buyLeverage: String(this.settings.leverage),
-        sellLeverage: String(this.settings.leverage),
-      });
-    } catch (err: any) {
-      if (!String(err?.message || "").toLowerCase().includes("not modified")) this.emitter.log(`[${symbol}] Leverage warning: ${err.message}`);
-    }
-  }
-
   private extractClosedTime(item: any): number {
     return normalizeTimestampMs(item.updatedTime || item.execTime || item.createdTime);
+  }
+
+  private markRiskUnavailable(reason: string, error: string) {
+    this.riskBlockReason = reason;
+    this.privateApiLastError = error;
+    this.emitRuntimeStatus();
+  }
+
+  private markRiskHealthy() {
+    this.riskBlockReason = null;
+    this.privateApiLastError = null;
+    this.lastSuccessfulRiskDataRefresh = Date.now();
+    this.emitRuntimeStatus();
+  }
+
+  private updateConsecutiveLossState(closed: any[]) {
+    const ordered = [...closed].sort((a: any, b: any) => this.extractClosedTime(b) - this.extractClosedTime(a));
+    const recent = ordered.slice(0, this.consecutiveLossCount);
+    if (recent.length === this.consecutiveLossCount && recent.every((trade: any) => Number(trade.closedPnl || 0) < 0)) {
+      const latestClose = this.extractClosedTime(recent[0]);
+      const until = latestClose + this.consecutiveLossPauseMs;
+      this.consecutiveLossUntil = until > Date.now() ? until : null;
+    } else {
+      this.consecutiveLossUntil = null;
+    }
   }
 
   private async getDailyRiskSnapshot() {
     const now = Date.now();
     const dayStartMs = getUtcDayStartMs(now);
-    // Preserve the rolling cross-midnight 30m loss-pause/cooldown history while accounting PnL from UTC day start.
     const historyStartMs = Math.min(dayStartMs, now - this.consecutiveLossPauseMs);
-    const [positions, closedResult] = await Promise.all([
-      this.riskManager.getOpenPositions(),
-      fetchClosedPnlRange(this.bybit, historyStartMs, now + 1),
-    ]);
-    return { positions, ...buildRiskAccounting(closedResult, positions, dayStartMs) };
+
+    const positionResult = await this.riskManager.getOpenPositions();
+    if (!positionResult.ok) {
+      this.markRiskUnavailable(POSITION_STATE_UNAVAILABLE, positionResult.error);
+      return { ok: false as const, reason: POSITION_STATE_UNAVAILABLE, error: positionResult.error };
+    }
+
+    const closedResult = await fetchClosedPnlRange(this.bybit, historyStartMs, now + 1);
+    if (!closedResult.ok) {
+      this.markRiskUnavailable(DAILY_PNL_UNAVAILABLE, closedResult.error);
+      return { ok: false as const, reason: DAILY_PNL_UNAVAILABLE, error: closedResult.error, positions: positionResult.positions };
+    }
+
+    const accounting = buildRiskAccounting(closedResult, positionResult.positions, dayStartMs);
+    this.updateConsecutiveLossState(accounting.closed);
+    this.markRiskHealthy();
+    return { ok: true as const, positions: positionResult.positions, ...accounting };
   }
 
   public async canOpenSymbol(symbol: string): Promise<{ allowed: boolean; reason?: string }> {
-    if (!this.isRunning) return { allowed: false, reason: "Bot engine is halted" };
+    if (!this.isRunning) return { allowed: false, reason: "BOT_HALTED" };
 
-    try {
-      const snapshot = await this.getDailyRiskSnapshot();
-      this.activePositions = snapshot.positions;
+    const snapshot = await this.getDailyRiskSnapshot();
+    if (!snapshot.ok) return { allowed: false, reason: snapshot.reason };
 
-      if (snapshot.positions.length >= this.settings.maxPositions) {
-        return { allowed: false, reason: `Max ${this.settings.maxPositions} concurrent positions reached` };
-      }
-      if (snapshot.positions.some((p: any) => p.symbol === symbol && Number(p.size || 0) > 0)) {
-        return { allowed: false, reason: "Same-symbol position already open" };
-      }
+    this.activePositions = snapshot.positions;
+    if (snapshot.positions.length >= this.settings.maxPositions) {
+      return { allowed: false, reason: `MAX_POSITIONS_REACHED` };
+    }
+    if (snapshot.positions.some((p: any) => p.symbol === symbol && Number(p.size || 0) > 0)) {
+      return { allowed: false, reason: "DUPLICATE_SYMBOL_BLOCKED" };
+    }
 
-      const dailyLimit = -Math.abs(this.settings.maxLossUsdt || 50);
-      const riskDecision = evaluateEntryRiskAccounting(snapshot, dailyLimit);
-      if (!riskDecision.allowed) {
-        if (riskDecision.breakerTriggered) {
-          this.circuitBreakerTriggered = true;
-          this.emitter.emitStatus(this.isRunning, true);
-        }
-        return { allowed: false, reason: riskDecision.reason || RISK_DATA_UNAVAILABLE };
+    const dailyLimit = -Math.abs(this.settings.maxLossUsdt || 50);
+    const riskDecision = evaluateEntryRiskAccounting(snapshot, dailyLimit);
+    if (!riskDecision.allowed) {
+      if (riskDecision.breakerTriggered) {
+        this.circuitBreakerTriggered = true;
+        this.emitRuntimeStatus();
       }
+      return { allowed: false, reason: riskDecision.reason || DAILY_PNL_UNAVAILABLE };
+    }
 
-      // The 3-loss pause is intentionally a rolling 30-minute rule across UTC midnight.
-      // It is separate from daily PnL accounting and naturally expires by timestamp.
-      const ordered = [...snapshot.closed].sort((a: any, b: any) => this.extractClosedTime(b) - this.extractClosedTime(a));
-      const lastThree = ordered.slice(0, 3);
-      if (lastThree.length === 3 && lastThree.every((t: any) => Number(t.closedPnl || 0) < 0)) {
-        const latestClose = this.extractClosedTime(lastThree[0]);
-        const remaining = this.consecutiveLossPauseMs - (Date.now() - latestClose);
-        if (remaining > 0) {
-          void dbRecordReportEvent({
-            eventKey: `loss-pause:${latestClose}`,
-            eventType: "loss_pause_trigger",
-            occurredAt: latestClose,
-            reportingDate: bangladeshDateForTimestamp(latestClose),
-            payload: { reason: "3 consecutive losses", streakCount: 3 },
-          });
-          return { allowed: false, reason: `3-loss pause active (${Math.ceil(remaining / 60000)}m remaining)` };
-        }
-      }
+    const ordered = [...snapshot.closed].sort((a: any, b: any) => this.extractClosedTime(b) - this.extractClosedTime(a));
+    if (this.consecutiveLossUntil && this.consecutiveLossUntil > Date.now()) {
+      const latestClose = this.extractClosedTime(ordered[0]);
+      void dbRecordReportEvent({
+        eventKey: `loss-pause:${latestClose}`,
+        eventType: "loss_pause_trigger",
+        occurredAt: latestClose,
+        reportingDate: bangladeshDateForTimestamp(latestClose),
+        payload: { reason: `${this.consecutiveLossCount} consecutive losses`, streakCount: this.consecutiveLossCount },
+      });
+      this.emitRuntimeStatus();
+      return { allowed: false, reason: "CONSECUTIVE_LOSS_BREAKER" };
+    }
 
-      const latestForSymbol = ordered.find((t: any) => t.symbol === symbol);
-      if (latestForSymbol) {
-        const closeTime = this.extractClosedTime(latestForSymbol);
-        const remaining = this.symbolCooldownMs - (Date.now() - closeTime);
-        if (remaining > 0) return { allowed: false, reason: `${symbol} post-close cooldown (${Math.ceil(remaining / 60000)}m remaining)` };
-      }
+    const latestForSymbol = ordered.find((t: any) => t.symbol === symbol);
+    if (latestForSymbol) {
+      const closeTime = this.extractClosedTime(latestForSymbol);
+      const remaining = this.symbolCooldownMs - (Date.now() - closeTime);
+      if (remaining > 0) return { allowed: false, reason: `SYMBOL_COOLDOWN_ACTIVE:${Math.ceil(remaining / 60000)}m` };
+    }
 
-      if (this.circuitBreakerTriggered) {
-        this.circuitBreakerTriggered = false;
-        this.emitter.emitStatus(this.isRunning, false);
+    if (this.circuitBreakerTriggered) {
+      this.circuitBreakerTriggered = false;
+      this.emitRuntimeStatus();
+    }
+    return { allowed: true };
+  }
+
+  private updateDailyCircuitBreaker(snapshot: { net: number | null }) {
+    if (!Number.isFinite(snapshot.net)) return;
+    const limit = -Math.abs(this.settings.maxLossUsdt || 50);
+    const triggered = Number(snapshot.net) <= limit;
+    if (triggered !== this.circuitBreakerTriggered) {
+      this.circuitBreakerTriggered = triggered;
+      this.emitRuntimeStatus();
+      if (triggered) {
+        this.emitter.log(`🚨 [DAILY ENTRY BREAKER] Net daily PnL $${Number(snapshot.net).toFixed(2)} reached $${limit.toFixed(2)}. New entries blocked; existing positions remain managed.`);
+        this.telegram.send(`🚨 <b>DAILY ENTRY BREAKER</b>\nNet daily PnL: <b>$${Number(snapshot.net).toFixed(2)}</b>. New entries are blocked; open positions continue to be managed.`);
+      } else {
+        this.emitter.log("✅ [DAILY ENTRY BREAKER] UTC trading-day risk condition cleared; new entries may resume if all other rules pass.");
       }
-      return { allowed: true };
-    } catch (err: any) {
-      return { allowed: false, reason: `Risk validation unavailable: ${err.message}` };
     }
   }
 
   public async checkCircuitBreaker() {
     if (!this.isRunning) return;
-    try {
-      const snapshot = await this.getDailyRiskSnapshot();
-      if (!snapshot.available || !Number.isFinite(snapshot.net)) {
-        this.emitter.log(`[Risk] ${RISK_DATA_UNAVAILABLE}: ${snapshot.error || "Closed PnL history unavailable"}. New entries fail closed; existing positions remain managed.`);
-        return;
-      }
-      const limit = -Math.abs(this.settings.maxLossUsdt || 50);
-      const triggered = Number(snapshot.net) <= limit;
-      if (triggered !== this.circuitBreakerTriggered) {
-        this.circuitBreakerTriggered = triggered;
-        this.emitter.emitStatus(this.isRunning, triggered);
-        if (triggered) {
-          this.emitter.log(`🚨 [DAILY ENTRY BREAKER] Net daily PnL $${Number(snapshot.net).toFixed(2)} reached $${limit.toFixed(2)}. New entries blocked; existing positions remain managed.`);
-          this.telegram.send(`🚨 <b>DAILY ENTRY BREAKER</b>\nNet daily PnL: <b>$${Number(snapshot.net).toFixed(2)}</b>. New entries are blocked; open positions continue to be managed.`);
-        } else {
-          this.emitter.log("✅ [DAILY ENTRY BREAKER] UTC trading-day risk condition cleared; new entries may resume if all other rules pass.");
-        }
-      }
-    } catch {
-      // Fail closed happens in canOpenSymbol. Avoid noisy background errors here.
+    const snapshot = await this.getDailyRiskSnapshot();
+    if (!snapshot.ok) {
+      this.emitter.log(`[Risk] ${snapshot.reason}: ${snapshot.error}. New entries fail closed; existing positions remain managed.`);
+      return;
     }
+    this.updateDailyCircuitBreaker(snapshot);
   }
 
   public async syncPositions() {
     try {
+      const snapshot = await this.getDailyRiskSnapshot();
+      if (!snapshot.ok) {
+        this.emitter.log(`[Risk Sync] ${snapshot.reason}: retaining last known positions; no close inference performed.`);
+        return;
+      }
+
       const previousSymbols = new Set(this.activePositions.filter((p) => Number(p.size || 0) > 0).map((p) => p.symbol));
-      const positions = await this.riskManager.getOpenPositions();
+      const positions = snapshot.positions;
       const currentSymbols = new Set(positions.map((p) => p.symbol));
 
       for (const symbol of previousSymbols) {
@@ -374,6 +421,9 @@ export class TradingEngine {
 
       this.activePositions = positions;
       for (const pos of positions) {
+        if (Number(pos.positionIdx ?? 0) !== 0) {
+          this.emitter.log(`[Risk] ${pos.symbol} is reported with positionIdx=${pos.positionIdx}; new entries require one-way mode.`);
+        }
         const price = Number(pos.markPrice || pos.avgPrice || 0);
         if (!this.positionState[pos.symbol] && price > 0) {
           const entry = Number(pos.avgPrice || price);
@@ -384,9 +434,9 @@ export class TradingEngine {
       }
       for (const symbol of Object.keys(this.positionState)) if (!currentSymbols.has(symbol)) delete this.positionState[symbol];
       this.emitter.updatePositions(positions);
-      await this.checkCircuitBreaker();
-    } catch {
-      // Keep the engine alive; entry checks fail closed if risk data cannot be fetched.
+      this.updateDailyCircuitBreaker(snapshot);
+    } catch (error: any) {
+      this.emitter.log(`[Risk Sync] Unexpected sync error: ${error?.message || error}`);
     }
   }
 
@@ -444,40 +494,104 @@ export class TradingEngine {
     }
   }
 
-  private async validatePreOrder(symbol: string, side: "Buy" | "Sell", notionalSizeUsdt: number): Promise<{ valid: boolean; qty: string; price: number; reason?: string }> {
+  private async validatePreOrder(
+    symbol: string,
+    side: "Buy" | "Sell",
+    notionalSizeUsdt: number,
+    requestedQty?: string,
+  ): Promise<PreOrderValidation> {
+    const denied = (reason: string, price: number = 0): PreOrderValidation => ({
+      valid: false,
+      qty: "0",
+      qtyNumber: 0,
+      price,
+      approvedNotional: notionalSizeUsdt,
+      actualNotional: 0,
+      reason,
+    });
+
     const risk = await this.canOpenSymbol(symbol);
-    if (!risk.allowed) return { valid: false, qty: "0", price: 0, reason: risk.reason };
+    if (!risk.allowed) return denied(risk.reason || "RISK_VALIDATION_FAILED");
 
-    try {
-      const walletRes = await this.bybit.getWalletBalance({ accountType: "UNIFIED", coin: "USDT" });
-      const coin = walletRes.result?.list?.[0]?.coin?.[0];
-      if (coin) {
-        const available = Number(coin.availableToWithdraw || 0);
-        const required = notionalSizeUsdt / (this.settings.leverage || 10);
-        if (available < required) return { valid: false, qty: "0", price: 0, reason: `Available margin $${available.toFixed(2)} < required $${required.toFixed(2)}` };
-      }
-
-      const orderbook = await this.bybit.getOrderbook({ category: "linear", symbol, limit: 1 });
-      if (orderbook.retCode !== 0 || !orderbook.result?.b?.length || !orderbook.result?.a?.length) return { valid: false, qty: "0", price: 0, reason: "Orderbook unavailable" };
-      const bid = Number(orderbook.result.b[0][0]);
-      const ask = Number(orderbook.result.a[0][0]);
-      const mid = (bid + ask) / 2;
-      const spread = mid > 0 ? ((ask - bid) / mid) * 100 : Number.POSITIVE_INFINITY;
-      if (!Number.isFinite(spread) || spread > 0.08) return { valid: false, qty: "0", price: side === "Buy" ? ask : bid, reason: `Spread ${spread.toFixed(3)}% exceeds 0.08%` };
-
-      const instrumentRes = await this.bybit.getInstrumentsInfo({ category: "linear", symbol });
-      const instrument: any = instrumentRes.result?.list?.[0];
-      if (instrumentRes.retCode !== 0 || !instrument) return { valid: false, qty: "0", price: side === "Buy" ? ask : bid, reason: "Instrument info unavailable" };
-      const minQty = Number(instrument.lotSizeFilter.minOrderQty);
-      const qtyStep = Number(instrument.lotSizeFilter.qtyStep);
-      const executionPrice = side === "Buy" ? ask : bid;
-      const rawQty = notionalSizeUsdt / executionPrice;
-      const precision = String(instrument.lotSizeFilter.qtyStep).split(".")[1]?.length || 0;
-      const qtyNum = Math.max(minQty, Math.floor(rawQty / qtyStep) * qtyStep);
-      return { valid: true, qty: qtyNum.toFixed(precision), price: executionPrice };
-    } catch (err: any) {
-      return { valid: false, qty: "0", price: 0, reason: `Pre-order validation error: ${err.message}` };
+    const wallet = await fetchUnifiedAvailableBalance(this.bybit);
+    if (!wallet.ok) {
+      this.emitter.log(`[${symbol}] ${wallet.reason}: ${wallet.error}`);
+      return denied(wallet.reason);
     }
+    const requiredMargin = notionalSizeUsdt / this.settings.leverage;
+    if (wallet.value + 1e-9 < requiredMargin) return denied("INSUFFICIENT_AVAILABLE_MARGIN");
+
+    const top = await fetchTopOfBook(this.bybit, symbol);
+    if (!top.ok) {
+      this.emitter.log(`[${symbol}] ${top.reason}: ${top.error}`);
+      return denied(top.reason);
+    }
+    const { bid, ask } = top.value;
+    const executionPrice = side === "Buy" ? ask : bid;
+    const mid = (bid + ask) / 2;
+    const spread = mid > 0 ? ((ask - bid) / mid) * 100 : Number.POSITIVE_INFINITY;
+    if (!Number.isFinite(spread) || spread > 0.08) return denied("SPREAD_LIMIT_EXCEEDED", executionPrice);
+
+    const instrument = await fetchInstrumentConstraints(this.bybit, symbol);
+    if (!instrument.ok) {
+      this.emitter.log(`[${symbol}] ${instrument.reason}: ${instrument.error}`);
+      return denied(instrument.reason, executionPrice);
+    }
+
+    const approved = calculateApprovedQuantity(notionalSizeUsdt, executionPrice, instrument.value);
+    if (!approved.ok) {
+      this.emitter.log(`[${symbol}] ${approved.reason}: ${approved.error}`);
+      return denied(approved.reason, executionPrice);
+    }
+
+    const finalQty = validateFinalRequestedQuantity(
+      requestedQty,
+      approved,
+      executionPrice,
+      notionalSizeUsdt,
+      instrument.value,
+    );
+    if (!finalQty.ok) {
+      this.emitter.log(`[${symbol}] ${finalQty.reason}: ${finalQty.error}`);
+      return denied(finalQty.reason, executionPrice);
+    }
+
+    return {
+      valid: true,
+      qty: finalQty.qtyText,
+      qtyNumber: finalQty.qty,
+      price: executionPrice,
+      approvedNotional: notionalSizeUsdt,
+      actualNotional: finalQty.actualNotional,
+      constraints: instrument.value,
+    };
+  }
+
+  private async enforceExecutionConfiguration(symbol: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const positionMode = await ensureOneWayPositionMode(this.bybit, symbol);
+    if (!positionMode.ok) {
+      this.emitter.log(`[${symbol}] ${positionMode.reason}: ${positionMode.error}`);
+      return { ok: false, reason: positionMode.reason };
+    }
+    const leverage = await ensureConfiguredLeverage(this.bybit, symbol, this.settings.leverage);
+    if (!leverage.ok) {
+      this.emitter.log(`[${symbol}] ${leverage.reason}: ${leverage.error}`);
+      return { ok: false, reason: leverage.reason };
+    }
+    return { ok: true };
+  }
+
+  private async resolveConfirmedFill(symbol: string, orderId: string, requestedQty: number) {
+    let latest = await fetchOrderFillSnapshot(this.bybit, symbol, orderId);
+    for (const delay of [150, 350, 700]) {
+      if (latest.confirmed) break;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      latest = await fetchOrderFillSnapshot(this.bybit, symbol, orderId);
+    }
+    return {
+      ...latest,
+      fullyFilled: latest.confirmed && latest.filledQty + 1e-10 >= requestedQty,
+    };
   }
 
   public async executeScannerEntry(
@@ -488,7 +602,7 @@ export class TradingEngine {
     ema200: number,
     rsi: number,
     quality?: ScannerEntryQualityContext
-  ): Promise<{ success: boolean; message: string; orderId?: string }> {
+  ): Promise<{ success: boolean; message: string; orderId?: string; fillConfirmed?: boolean }> {
     const targetSymbol = symbol.toUpperCase();
     if (this.isProcessingTrade[targetSymbol]) return { success: false, message: `Trade already in progress for ${targetSymbol}` };
     this.isProcessingTrade[targetSymbol] = true;
@@ -497,25 +611,35 @@ export class TradingEngine {
       const baseNotional = this.settings.positionMarginUsdt * this.settings.leverage;
       let targetNotional = baseNotional;
       let pre = await this.validatePreOrder(targetSymbol, side, targetNotional);
-      if (!pre.valid) return { success: false, message: pre.reason || "Risk validation failed" };
+      if (!pre.valid || !pre.constraints) return { success: false, message: pre.reason || "Risk validation failed" };
       currentPrice = pre.price;
+
       let stopPlan = await this.buildAdaptiveStopPlan(targetSymbol, side, currentPrice, quality);
-      const riskAdjustedNotional = calculateRiskAdjustedNotional(baseNotional, stopPlan.stopDistancePercent, this.settings.slPercent);
-      if (riskAdjustedNotional < targetNotional - 0.5) {
+      for (let pass = 0; pass < 2; pass++) {
+        const riskAdjustedNotional = Math.min(
+          targetNotional,
+          calculateRiskAdjustedNotional(baseNotional, stopPlan.stopDistancePercent, this.settings.slPercent),
+        );
+        if (riskAdjustedNotional >= targetNotional - 1e-8) break;
         targetNotional = riskAdjustedNotional;
         pre = await this.validatePreOrder(targetSymbol, side, targetNotional);
-        if (!pre.valid) return { success: false, message: pre.reason || "Risk-adjusted sizing validation failed" };
+        if (!pre.valid || !pre.constraints) return { success: false, message: pre.reason || "Risk-adjusted sizing validation failed" };
         currentPrice = pre.price;
         stopPlan = await this.buildAdaptiveStopPlan(targetSymbol, side, currentPrice, quality);
       }
-      const { takeProfit } = this.riskManager.calculateBrackets(currentPrice, this.settings.tpPercent, this.settings.slPercent, side);
-      const stopLoss = stopPlan.stopLoss.toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
-      const actualNotional = Number(pre.qty) * currentPrice;
-      const actualMargin = actualNotional / this.settings.leverage;
-      await this.ensureLeverage(targetSymbol);
 
-      this.emitter.log(`⚡ [Scanner Execution] ${side === "Buy" ? "LONG" : "SHORT"} ${targetSymbol} | Margin cap $${this.settings.positionMarginUsdt} | Used ~$${actualMargin.toFixed(2)} | Notional ~$${actualNotional.toFixed(2)} | TP ${takeProfit} | SL ${stopLoss}`);
+      const direction = side === "Buy" ? 1 : -1;
+      const rawTakeProfit = currentPrice * (1 + direction * this.settings.tpPercent / 100);
+      const protective = quantizeProtectivePrices(side, rawTakeProfit, stopPlan.stopLoss, pre.constraints);
+      const actualNotional = pre.actualNotional;
+      const actualMargin = actualNotional / this.settings.leverage;
+
+      const config = await this.enforceExecutionConfiguration(targetSymbol);
+      if (!config.ok) return { success: false, message: config.reason };
+
+      this.emitter.log(`⚡ [Scanner Execution] ${side === "Buy" ? "LONG" : "SHORT"} ${targetSymbol} | Margin cap $${this.settings.positionMarginUsdt} | Approved notional $${targetNotional.toFixed(2)} | Requested ~$${actualNotional.toFixed(2)} | TP ${protective.takeProfit} | SL ${protective.stopLoss}`);
       this.emitter.log(`[Trade Quality] ${targetSymbol} RSI=${rsi.toFixed(1)} ATR%=${stopPlan.atrPercent.toFixed(3)} OI=${quality?.oiExpansionPercent?.toFixed(3) ?? "N/A"}% Spread=${quality?.spreadPercent?.toFixed(3) ?? "N/A"}% Trend=${quality?.trendState ?? "N/A"} EMA9=${quality?.ema9?.toFixed(6) ?? "N/A"} EMA21=${quality?.ema21?.toFixed(6) ?? "N/A"} Timing=${quality?.emaTimingScore?.toFixed(2) ?? "N/A"}/2 Cross=${quality?.freshCross ?? "none"}@${quality?.crossoverAgeCandles ?? "N/A"} Setup=${quality?.finalSetupScore?.toFixed(2) ?? "N/A"} BreakoutBonus=${Boolean(quality?.breakoutBonus)} Candle=${quality?.entryCandleDirection ?? "N/A"} SL=${stopPlan.stopDistancePercent.toFixed(3)}% (${stopPlan.stopDistanceAtrMultiple.toFixed(2)} ATR) Reason=${stopPlan.reason}`);
+
       const orderRes = await this.bybit.submitOrder({
         category: "linear",
         symbol: targetSymbol,
@@ -523,33 +647,58 @@ export class TradingEngine {
         orderType: "Market",
         qty: pre.qty,
         timeInForce: "IOC",
-        takeProfit,
-        stopLoss,
+        takeProfit: protective.takeProfit,
+        stopLoss: protective.stopLoss,
+        positionIdx: 0,
       });
       if (orderRes.retCode !== 0) return { success: false, message: orderRes.retMsg || "Bybit rejected scanner order" };
 
-      const orderId = orderRes.result?.orderId || `scan-${Date.now()}`;
-      const position = { symbol: targetSymbol, side, size: pre.qty, avgPrice: String(currentPrice), markPrice: String(currentPrice) };
-      this.activePositions.push(position);
+      const orderId = orderRes.result?.orderId;
+      if (!orderId) {
+        setTimeout(() => void this.syncPositions(), 800);
+        return { success: true, message: `${targetSymbol} order acknowledged; fill confirmation pending`, fillConfirmed: false };
+      }
+
+      const fill = await this.resolveConfirmedFill(targetSymbol, orderId, pre.qtyNumber);
+      if (!fill.confirmed || !fill.avgFillPrice) {
+        this.emitter.log(`[${targetSymbol}] Order ${orderId} acknowledged by Bybit; no execution fill confirmed yet.`);
+        setTimeout(() => void this.syncPositions(), 800);
+        return { success: true, message: `${targetSymbol} order acknowledged; fill confirmation pending`, orderId, fillConfirmed: false };
+      }
+
+      const filledQty = fill.filledQty;
+      const fillPrice = fill.avgFillPrice;
+      const filledNotional = filledQty * fillPrice;
+      const filledMargin = filledNotional / this.settings.leverage;
+      this.activePositions = mergePositionUpdates(this.activePositions, [{
+        symbol: targetSymbol,
+        side,
+        positionIdx: 0,
+        size: String(filledQty),
+        avgPrice: String(fillPrice),
+        markPrice: String(fillPrice),
+        stopLoss: protective.stopLoss,
+        takeProfit: protective.takeProfit,
+      }]);
       this.positionState[targetSymbol] = {
-        peakPrice: currentPrice,
+        peakPrice: fillPrice,
         breakEvenSet: false,
-        initialStopLoss: Number(stopLoss),
+        initialStopLoss: Number(protective.stopLoss),
         initialRiskPercent: stopPlan.stopDistancePercent,
         atrPercent: stopPlan.atrPercent,
       };
       this.emitter.updatePositions(this.activePositions);
-      this.telegram.sendTradeExecution(targetSymbol, side === "Buy" ? "Long (Strict Scanner)" : "Short (Strict Scanner)", currentPrice, pre.qty, takeProfit, stopLoss);
+      this.telegram.sendTradeExecution(targetSymbol, side === "Buy" ? "Long (Strict Scanner)" : "Short (Strict Scanner)", fillPrice, String(filledQty), protective.takeProfit, protective.stopLoss);
       dbRecordTrade({
         symbol: targetSymbol,
         side,
-        entryPrice: currentPrice,
+        entryPrice: fillPrice,
         status: "OPEN",
         source: "auto",
-        openingOrderId: orderRes.result?.orderId || orderId,
+        openingOrderId: orderId,
         openingOrderLinkId: null,
-        sizeNotional: actualNotional,
-        marginUsed: actualMargin,
+        sizeNotional: filledNotional,
+        marginUsed: filledMargin,
         leverage: this.settings.leverage,
         entryDiagnostics: {
           rsi,
@@ -575,13 +724,22 @@ export class TradingEngine {
           slDistanceAtrMultiple: stopPlan.stopDistanceAtrMultiple,
           slReason: stopPlan.reason,
           configuredMarginCapUsdt: this.settings.positionMarginUsdt,
-          actualMarginUsedUsdt: actualMargin,
-          actualNotionalUsdt: actualNotional,
+          riskApprovedNotionalUsdt: targetNotional,
+          actualMarginUsedUsdt: filledMargin,
+          actualNotionalUsdt: filledNotional,
+          requestedQty: pre.qty,
+          confirmedFillQty: filledQty,
+          fillCompleteAtConfirmation: fill.fullyFilled,
         },
       });
       if (!this.watchlist.includes(targetSymbol)) void this.addSymbol(targetSymbol);
       setTimeout(() => void this.syncPositions(), 800);
-      return { success: true, message: `${side === "Buy" ? "Long" : "Short"} entry placed for ${targetSymbol}`, orderId };
+      return {
+        success: true,
+        message: `${side === "Buy" ? "Long" : "Short"} ${fill.fullyFilled ? "fill" : "partial fill"} confirmed for ${targetSymbol}`,
+        orderId,
+        fillConfirmed: true,
+      };
     } catch (err: any) {
       return { success: false, message: err.message };
     } finally {
@@ -611,10 +769,22 @@ export class TradingEngine {
 
     if (pnlPercent >= breakEvenTriggerPercent && !state.breakEvenSet) {
       try {
+        const instrument = await fetchInstrumentConstraints(this.bybit, symbol);
+        if (!instrument.ok) {
+          this.emitter.log(`[${symbol}] Break-even skipped: ${instrument.reason}`);
+          return;
+        }
+        const candidateText = quantizePrice(
+          entry,
+          instrument.value.tickSize,
+          instrument.value.tickSizeText,
+          isLong ? "ceil" : "floor",
+        );
+        const candidate = Number(candidateText);
         const currentStop = Number(pos.stopLoss || state.initialStopLoss || 0);
-        if (this.isCandidateStopTighter(isLong ? "Buy" : "Sell", currentStop, entry)) {
-          await this.bybit.setTradingStop({ category: "linear", symbol, stopLoss: String(entry), slTriggerBy: "LastPrice", positionIdx: 0 });
-          this.emitter.log(`[${symbol}] +${breakEvenTriggerPercent.toFixed(2)}% quality threshold reached; SL tightened to break-even.`);
+        if (this.isCandidateStopTighter(isLong ? "Buy" : "Sell", currentStop, candidate)) {
+          await this.bybit.setTradingStop({ category: "linear", symbol, stopLoss: candidateText, slTriggerBy: "LastPrice", positionIdx: 0 });
+          this.emitter.log(`[${symbol}] +${breakEvenTriggerPercent.toFixed(2)}% quality threshold reached; SL tightened to tick-aligned break-even.`);
         } else {
           this.emitter.log(`[${symbol}] Break-even candidate skipped because current SL is already tighter; no widening allowed.`);
         }
@@ -643,12 +813,14 @@ export class TradingEngine {
         reduceOnly: true,
         timeInForce: "IOC",
         orderLinkId: this.makeCloseOrderLinkId("trail"),
+        positionIdx: 0,
       });
       if (closeRes.retCode === 0) {
-        this.emitter.log(`[${symbol}] Trailing stop exit submitted.`);
-        this.activePositions = this.activePositions.filter((p) => p.symbol !== symbol);
-        delete this.positionState[symbol];
-        this.emitter.updatePositions(this.activePositions);
+        const orderId = closeRes.result?.orderId;
+        const fill = orderId ? await this.resolveConfirmedFill(symbol, orderId, Number(pos.size)) : null;
+        this.emitter.log(fill?.confirmed
+          ? `[${symbol}] Trailing-stop execution confirmed for ${fill.filledQty} @ ${fill.avgFillPrice}.`
+          : `[${symbol}] Trailing-stop close acknowledged; awaiting execution/position confirmation.`);
         setTimeout(() => void this.syncPositions(), 500);
       }
     } catch (err: any) {
@@ -668,7 +840,8 @@ export class TradingEngine {
       globalMaxLossUsdt: -50,
     };
     this.scanner.setMaxConcurrent(3);
-    this.emitter.log("[Settings] Strict risk caps enforced: $50 margin, 3 slots, -$50 daily breaker.");
+    this.emitter.log("[Settings] Strict risk caps enforced by backend runtime policy.");
+    this.emitRuntimeStatus();
   }
 
   public async addSymbol(symbol: string) {
@@ -695,18 +868,75 @@ export class TradingEngine {
   public getIsRunning() { return this.isRunning; }
   public testTelegram() { this.telegram.send("🔔 <b>Test Notification</b>\nStrict Bybit demo trading pipeline is active."); }
 
+  public getRuntimeRiskStatus(): RuntimeRiskStatus {
+    const now = Date.now();
+    const consecutiveActive = Boolean(this.consecutiveLossUntil && this.consecutiveLossUntil > now);
+    const privateWs = this.wsManager.getPrivateHealth();
+    const privateApiHealthy = this.riskBlockReason === null && this.lastSuccessfulRiskDataRefresh !== null;
+    const breakerReason = this.riskBlockReason
+      || (this.circuitBreakerTriggered ? "DAILY_LOSS_BREAKER" : null)
+      || (consecutiveActive ? "CONSECUTIVE_LOSS_BREAKER" : null);
+    return {
+      leverage: this.settings.leverage,
+      marginCapUsdt: this.settings.positionMarginUsdt,
+      approximateMaxNotionalUsdt: this.settings.positionMarginUsdt * this.settings.leverage,
+      maxPositions: this.settings.maxPositions,
+      scannerMaxConcurrent: this.scanner.maxConcurrent,
+      duplicateSymbolPolicy: "DENY_SAME_SYMBOL",
+      cooldown: {
+        symbolMs: this.symbolCooldownMs,
+        description: "Post-close same-symbol cooldown",
+      },
+      dailyLossBreaker: {
+        limitUsdt: -Math.abs(this.settings.maxLossUsdt),
+        active: this.circuitBreakerTriggered,
+        scope: "NEW_ENTRIES_ONLY",
+      },
+      consecutiveLossBreaker: {
+        losses: this.consecutiveLossCount,
+        pauseMs: this.consecutiveLossPauseMs,
+        active: consecutiveActive,
+        until: consecutiveActive ? this.consecutiveLossUntil : null,
+      },
+      stopLossDiscipline: {
+        mode: "ADAPTIVE_ATR_STRUCTURE",
+        minInitialDistancePercent: 1.0,
+        maxInitialDistancePercent: 1.8,
+        breakEvenAtrMultiple: 1.25,
+        neverWiden: true,
+      },
+      botRunning: this.isRunning,
+      scannerRunning: this.scannerRunning,
+      autoTrade: this.scanner.autoTrade,
+      breakerActive: Boolean(breakerReason),
+      breakerReason,
+      bybitPrivateApiHealth: {
+        healthy: privateApiHealthy,
+        status: privateApiHealthy ? "healthy" : "unavailable",
+        lastError: this.privateApiLastError,
+      },
+      bybitPrivateWsHealth: privateWs,
+      lastSuccessfulRiskDataRefresh: this.lastSuccessfulRiskDataRefresh,
+    };
+  }
+
+  public emitRuntimeStatus() {
+    this.emitter.updateRuntimeStatus(this.getRuntimeRiskStatus());
+  }
+
   public resetCircuitBreaker() {
     this.circuitBreakerTriggered = false;
-    this.emitter.emitStatus(this.isRunning, false);
-    this.emitter.log("✅ Circuit-breaker display reset. Entry risk is re-validated before every order.");
+    this.emitRuntimeStatus();
+    this.emitter.log("✅ Daily breaker display reset. Risk-data and loss-pause breakers remain authoritative and are revalidated before every entry.");
   }
 
   public start() {
     if (this.isRunning) return false;
     this.isRunning = true;
-    this.emitter.emitStatus(true, this.circuitBreakerTriggered);
+    this.emitter.emitStatus(true, this.getRuntimeRiskStatus().breakerActive);
+    this.emitRuntimeStatus();
     this.telegram.sendBotStatus(true);
-    this.emitter.log(`🚀 [Bot Started] Strict mode: max ${this.settings.maxPositions} positions, $${this.settings.positionMarginUsdt} margin each, 10m symbol cooldown, -$${this.settings.maxLossUsdt} daily entry breaker.`);
+    this.emitter.log(`🚀 [Bot Started] Strict runtime risk policy active.`);
     void this.syncPositions();
     return true;
   }
@@ -714,13 +944,14 @@ export class TradingEngine {
   public stop() {
     if (!this.isRunning) return false;
     this.isRunning = false;
-    this.emitter.emitStatus(false, this.circuitBreakerTriggered);
+    this.emitter.emitStatus(false, this.getRuntimeRiskStatus().breakerActive);
+    this.emitRuntimeStatus();
     this.telegram.sendBotStatus(false);
     this.emitter.log("🛑 [Bot Stopped] New entries and active management paused.");
     return true;
   }
 
-  public async manualClosePosition(symbol: string): Promise<{ success: boolean; message: string }> {
+  public async manualClosePosition(symbol: string): Promise<{ success: boolean; message: string; orderId?: string; fillConfirmed?: boolean }> {
     const target = symbol.toUpperCase();
     const pos = this.activePositions.find((p) => p.symbol === target && Number(p.size || 0) > 0);
     if (!pos) return { success: false, message: `No active position found for ${target}` };
@@ -734,13 +965,26 @@ export class TradingEngine {
         reduceOnly: true,
         timeInForce: "IOC",
         orderLinkId: this.makeCloseOrderLinkId("manual"),
+        positionIdx: 0,
       });
       if (result.retCode !== 0) return { success: false, message: result.retMsg || "Bybit rejected close" };
-      this.activePositions = this.activePositions.filter((p) => p.symbol !== target);
-      delete this.positionState[target];
-      this.emitter.updatePositions(this.activePositions);
+      const orderId = result.result?.orderId;
+      const fill = orderId ? await this.resolveConfirmedFill(target, orderId, Number(pos.size)) : null;
       setTimeout(() => void this.syncPositions(), 500);
-      return { success: true, message: `Successfully closed ${target}.` };
+      if (fill?.confirmed) {
+        return {
+          success: true,
+          message: `${target} close execution confirmed for ${fill.filledQty} @ ${fill.avgFillPrice}`,
+          orderId,
+          fillConfirmed: true,
+        };
+      }
+      return {
+        success: true,
+        message: `${target} close acknowledged; awaiting execution/position confirmation`,
+        orderId,
+        fillConfirmed: false,
+      };
     } catch (err: any) {
       return { success: false, message: err.message };
     }
@@ -749,55 +993,125 @@ export class TradingEngine {
   public async closeAllPositions(): Promise<{ success: boolean; closedCount: number; results: any[] }> {
     const results: any[] = [];
     let closedCount = 0;
-    try {
-      const positions = await this.riskManager.getOpenPositions();
-      for (const pos of positions) {
-        try {
-          const result = await this.bybit.submitOrder({
-            category: "linear",
-            symbol: pos.symbol,
-            side: pos.side === "Buy" ? "Sell" : "Buy",
-            orderType: "Market",
-            qty: String(pos.size),
-            reduceOnly: true,
-            timeInForce: "IOC",
-            orderLinkId: this.makeCloseOrderLinkId("manual"),
-          });
-          const success = result.retCode === 0;
-          if (success) closedCount++;
-          results.push({ symbol: pos.symbol, success, orderId: result.result?.orderId, error: success ? undefined : result.retMsg });
-        } catch (err: any) {
-          results.push({ symbol: pos.symbol, success: false, error: err.message });
-        }
-      }
-      setTimeout(() => void this.syncPositions(), 800);
-      return { success: true, closedCount, results };
-    } catch (err: any) {
-      return { success: false, closedCount, results: [{ error: err.message }] };
+    const positionResult = await this.riskManager.getOpenPositions();
+    if (!positionResult.ok) {
+      return { success: false, closedCount: 0, results: [{ error: POSITION_STATE_UNAVAILABLE }] };
     }
+
+    for (const pos of positionResult.positions) {
+      try {
+        const result = await this.bybit.submitOrder({
+          category: "linear",
+          symbol: pos.symbol,
+          side: pos.side === "Buy" ? "Sell" : "Buy",
+          orderType: "Market",
+          qty: String(pos.size),
+          reduceOnly: true,
+          timeInForce: "IOC",
+          orderLinkId: this.makeCloseOrderLinkId("manual"),
+          positionIdx: 0,
+        });
+        if (result.retCode !== 0) {
+          results.push({ symbol: pos.symbol, success: false, error: result.retMsg || "Bybit rejected close" });
+          continue;
+        }
+        const orderId = result.result?.orderId;
+        const fill = orderId ? await this.resolveConfirmedFill(pos.symbol, orderId, Number(pos.size)) : null;
+        const fullyClosedFill = Boolean(fill?.confirmed && fill.fullyFilled);
+        if (fullyClosedFill) closedCount++;
+        results.push({
+          symbol: pos.symbol,
+          success: true,
+          orderId,
+          acknowledged: true,
+          fillConfirmed: Boolean(fill?.confirmed),
+          fullyClosedFill,
+          filledQty: fill?.filledQty || 0,
+          avgFillPrice: fill?.avgFillPrice || null,
+        });
+      } catch (err: any) {
+        results.push({ symbol: pos.symbol, success: false, error: err.message });
+      }
+    }
+    setTimeout(() => void this.syncPositions(), 800);
+    return { success: results.every((item) => item.success), closedCount, results };
   }
 
-  public async executeManualTestOrder(symbol: string = "BTCUSDT", customQty?: string): Promise<{ success: boolean; message: string; orderId?: string }> {
+  public async executeManualTestOrder(symbol: string = "BTCUSDT", customQty?: string): Promise<{ success: boolean; message: string; orderId?: string; fillConfirmed?: boolean }> {
     const target = symbol.toUpperCase();
-    const notional = this.settings.positionMarginUsdt * this.settings.leverage;
-    const pre = await this.validatePreOrder(target, "Buy", notional);
-    if (!pre.valid) return { success: false, message: pre.reason || "Risk validation failed" };
-    const qty = customQty || pre.qty;
-    const { takeProfit, stopLoss } = this.riskManager.calculateBrackets(pre.price, this.settings.tpPercent, this.settings.slPercent, "Buy");
+    const approvedNotional = this.settings.positionMarginUsdt * this.settings.leverage;
+    const pre = await this.validatePreOrder(target, "Buy", approvedNotional, customQty);
+    if (!pre.valid || !pre.constraints) return { success: false, message: pre.reason || "Risk validation failed" };
+
+    const rawTakeProfit = pre.price * (1 + this.settings.tpPercent / 100);
+    const rawStopLoss = pre.price * (1 - this.settings.slPercent / 100);
+    const protective = quantizeProtectivePrices("Buy", rawTakeProfit, rawStopLoss, pre.constraints);
     try {
-      await this.ensureLeverage(target);
+      const config = await this.enforceExecutionConfiguration(target);
+      if (!config.ok) return { success: false, message: config.reason };
+
       const result = await this.bybit.submitOrder({
-        category: "linear", symbol: target, side: "Buy", orderType: "Market", qty,
-        timeInForce: "IOC", takeProfit, stopLoss,
+        category: "linear",
+        symbol: target,
+        side: "Buy",
+        orderType: "Market",
+        qty: pre.qty,
+        timeInForce: "IOC",
+        takeProfit: protective.takeProfit,
+        stopLoss: protective.stopLoss,
+        positionIdx: 0,
       });
       if (result.retCode !== 0) return { success: false, message: result.retMsg || "Bybit rejected test order" };
-      const orderId = result.result?.orderId || `test-${Date.now()}`;
-      this.activePositions.push({ symbol: target, side: "Buy", size: qty, avgPrice: String(pre.price), markPrice: String(pre.price) });
-      this.positionState[target] = { peakPrice: pre.price, breakEvenSet: false };
+      const orderId = result.result?.orderId;
+      if (!orderId) {
+        setTimeout(() => void this.syncPositions(), 800);
+        return { success: true, message: `Test order acknowledged for ${target}; fill confirmation pending`, fillConfirmed: false };
+      }
+
+      const fill = await this.resolveConfirmedFill(target, orderId, pre.qtyNumber);
+      if (!fill.confirmed || !fill.avgFillPrice) {
+        setTimeout(() => void this.syncPositions(), 800);
+        return { success: true, message: `Test order acknowledged for ${target}; fill confirmation pending`, orderId, fillConfirmed: false };
+      }
+
+      const filledNotional = fill.filledQty * fill.avgFillPrice;
+      const filledMargin = filledNotional / this.settings.leverage;
+      this.activePositions = mergePositionUpdates(this.activePositions, [{
+        symbol: target,
+        side: "Buy",
+        positionIdx: 0,
+        size: String(fill.filledQty),
+        avgPrice: String(fill.avgFillPrice),
+        markPrice: String(fill.avgFillPrice),
+        stopLoss: protective.stopLoss,
+        takeProfit: protective.takeProfit,
+      }]);
+      this.positionState[target] = {
+        peakPrice: fill.avgFillPrice,
+        breakEvenSet: false,
+        initialStopLoss: Number(protective.stopLoss),
+        initialRiskPercent: this.settings.slPercent,
+      };
       this.emitter.updatePositions(this.activePositions);
-      dbRecordTrade({ symbol: target, side: "Buy", entryPrice: pre.price, status: "OPEN", source: "manual", openingOrderId: result.result?.orderId || orderId, openingOrderLinkId: null, sizeNotional: notional, marginUsed: this.settings.positionMarginUsdt, leverage: this.settings.leverage });
+      dbRecordTrade({
+        symbol: target,
+        side: "Buy",
+        entryPrice: fill.avgFillPrice,
+        status: "OPEN",
+        source: "manual",
+        openingOrderId: orderId,
+        openingOrderLinkId: null,
+        sizeNotional: filledNotional,
+        marginUsed: filledMargin,
+        leverage: this.settings.leverage,
+      });
       setTimeout(() => void this.syncPositions(), 800);
-      return { success: true, message: `Test long placed for ${target}`, orderId };
+      return {
+        success: true,
+        message: `Test ${fill.fullyFilled ? "fill" : "partial fill"} confirmed for ${target}`,
+        orderId,
+        fillConfirmed: true,
+      };
     } catch (err: any) {
       return { success: false, message: err.message };
     }
@@ -806,7 +1120,9 @@ export class TradingEngine {
   public shutdown() {
     if (this.syncTimer) clearInterval(this.syncTimer);
     this.syncTimer = null;
+    this.scannerRunning = false;
     this.stop();
     this.wsManager.close();
+    this.emitRuntimeStatus();
   }
 }
