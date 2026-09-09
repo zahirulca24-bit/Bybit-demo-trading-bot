@@ -24,7 +24,7 @@ export function ScannedPairsTable({ symbols, selectedSymbol, onSelectSymbol, onQ
   });
 
   const formatPrice = (price?: number) => {
-    if (price === undefined || !Number.isFinite(price)) return "$0.00";
+    if (price === undefined || !Number.isFinite(price)) return "—";
     if (price >= 1000) return `$${price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     if (price >= 1) return `$${price.toFixed(3)}`;
     return `$${price.toFixed(5)}`;
@@ -52,7 +52,7 @@ export function ScannedPairsTable({ symbols, selectedSymbol, onSelectSymbol, onQ
                 <td className="px-3 py-3"><span className={item.isTrend15mValid ? "text-emerald-400" : "text-neutral-500"}>{item.trend15m}</span><div className="text-[10px] text-neutral-500">Price must confirm EMA50 side</div></td>
                 <td className="px-3 py-3"><span className={item.isSpreadValid ? "text-emerald-400" : "text-rose-400"}>{item.spreadPercent.toFixed(3)}%</span><div className="text-[10px] text-neutral-500">≤ 0.08%</div></td>
                 <td className="px-3 py-3"><span className={item.isAtrValid ? "text-emerald-400" : "text-rose-400"}>{item.atr5mPercent.toFixed(2)}%</span><div className="text-[10px] text-neutral-500">0.30–1.20%</div></td>
-                <td className="px-3 py-3"><span className={item.isOiValid ? "text-emerald-400" : "text-rose-400"}>{item.oiChangePercent1h >= 0 ? "+" : ""}{item.oiChangePercent1h.toFixed(2)}%</span><div className="text-[10px] text-neutral-500">Real ≥ +0.50%; unavailable fails</div></td>
+                <td className="px-3 py-3"><span className={item.oiAvailable === false ? "text-neutral-500" : item.isOiValid ? "text-emerald-400" : "text-rose-400"}>{item.oiAvailable === false ? "—" : `${item.oiChangePercent1h >= 0 ? "+" : ""}${item.oiChangePercent1h.toFixed(2)}%`}</span><div className="text-[10px] text-neutral-500">Real ≥ +0.50%; unavailable fails</div></td>
                 <td className="px-3 py-3"><span className={item.isRsi5mValid ? "text-emerald-400" : "text-neutral-400"}>{item.rsi14_5m.toFixed(1)}</span><div className="text-[10px] text-neutral-500">{item.rsiZone5m}</div></td>
                 <td className="px-3 py-3"><span className={item.gates.passedAll ? "text-emerald-400" : "text-neutral-400"}>{item.pipelineStatus}</span></td>
                 <td className="px-4 py-3 text-right"><div className="flex justify-end items-center gap-2"><span className={item.actionType === "LONG" ? "text-emerald-400" : item.actionType === "SHORT" ? "text-rose-400" : "text-neutral-400"}>{item.actionType === "LONG" ? <TrendingUp className="w-3.5 h-3.5 inline" /> : item.actionType === "SHORT" ? <TrendingDown className="w-3.5 h-3.5 inline" /> : null} {item.signalAction}</span>{item.gates.passedAll && onQuickBuy && <button onClick={e => { e.stopPropagation(); onQuickBuy(item.symbol); }} className="px-2 py-1 rounded bg-blue-600 text-white text-[10px]">Quick Buy</button>}</div></td>

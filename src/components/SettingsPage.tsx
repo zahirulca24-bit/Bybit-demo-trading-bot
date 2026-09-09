@@ -61,16 +61,16 @@ export function SettingsPage({ settings, updateSetting, systemLogs = [] }: Setti
   }, [localLogs, systemLogs]);
 
   const strictControls = [
-    ["Leverage", "10x"],
-    ["Position margin", "$50"],
-    ["Approx. notional", "~$500"],
-    ["Max concurrent positions", "3"],
-    ["Same-symbol duplicate", "Blocked"],
-    ["Post-close cooldown", "10 minutes"],
-    ["Daily net entry breaker", "-$50"],
-    ["3-loss pause", "30 minutes"],
-    ["Breaker scope", "New entries only"],
-    ["Stop-loss discipline", "Never widened"],
+    ["Leverage", "10x", true],
+    ["Position margin max", "$50", true],
+    ["Approx. base notional", "~$500", false],
+    ["Max concurrent positions", "3", true],
+    ["Same-symbol duplicate", "Blocked", false],
+    ["Post-close cooldown", "10 minutes", true],
+    ["Daily net entry breaker", "-$50", true],
+    ["3-loss pause", "30 minutes", false],
+    ["Breaker scope", "New entries only", false],
+    ["Stop-loss discipline", "Never widened", false],
   ];
 
   return (
@@ -104,16 +104,31 @@ export function SettingsPage({ settings, updateSetting, systemLogs = [] }: Setti
       <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 sm:p-6">
         <div className="flex items-center gap-3 mb-4"><ShieldCheck className="w-5 h-5 text-emerald-400" /><div><h2 className="font-bold text-white">Locked Execution & Risk Controls</h2><p className="text-xs text-neutral-400">These values reflect the live strict runtime and are not reset by analytics baseline actions.</p></div></div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {strictControls.map(([label, value]) => <div key={label} className="bg-neutral-950 border border-neutral-800 rounded-lg p-3"><p className="text-[11px] text-neutral-500">{label}</p><p className="text-sm font-bold text-white mt-1">{value}</p></div>)}
+          {strictControls.map(([label, value, locked]) => <div key={String(label)} className="bg-neutral-950 border border-neutral-800 rounded-lg p-3"><p className="text-[11px] text-neutral-500">{label}</p><p className="text-sm font-bold text-white mt-1">{value}</p>{locked && <p className="text-[10px] text-amber-300 mt-1">Locked by strict risk profile</p>}</div>)}
         </div>
         <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-950/10 p-3 text-xs text-amber-200 flex items-start gap-2"><ShieldAlert className="w-4 h-4 mt-0.5 shrink-0" /><span>The daily -$50 breaker blocks <strong>new entries only</strong>. It does not stop the engine, disable scanner auto-trade, close positions, or reset settings/history.</span></div>
       </div>
 
       <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-5 sm:p-6">
-        <div className="flex items-center gap-3 mb-5"><Sliders className="w-5 h-5 text-blue-400" /><div><h2 className="font-bold text-white">Trade Brackets</h2><p className="text-xs text-neutral-400">Existing TP/SL/trailing configuration. Stop-loss logic may tighten protection but must never widen risk.</p></div></div>
+        <div className="flex items-center gap-3 mb-5"><Sliders className="w-5 h-5 text-blue-400" /><div><h2 className="font-bold text-white">Trade Brackets & Adaptive Protection</h2><p className="text-xs text-neutral-400">Automated scanner entries use ATR/structure-aware initial SL; the UI does not present the legacy fixed-1% stop as runtime behavior.</p></div></div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-5 text-xs">
+          <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-4 space-y-1 text-neutral-300">
+            <p className="font-bold text-blue-300">Initial adaptive SL</p>
+            <p>ATR14 from confirmed 5m candles · multiplier 1.20x–1.50x</p>
+            <p>Structure lookback: recent 6 confirmed 5m candles</p>
+            <p>Long: swing low − 0.15×ATR · Short: swing high + 0.15×ATR</p>
+            <p>Distance bounded to 1.00%–1.80%; wider SL reduces notional to preserve approximate gross price-risk.</p>
+          </div>
+          <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-4 space-y-1 text-neutral-300">
+            <p className="font-bold text-amber-300">Break-even / trailing</p>
+            <p>Trigger = max(1.00%, initial SL distance %, 1.25×ATR%)</p>
+            <p>Trailing begins only after the same quality threshold.</p>
+            <p>Break-even and trailing only tighten risk; SL is never widened after entry.</p>
+          </div>
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <SettingInput label="Take Profit %" value={settings.tpPercent} min={0.1} max={10} step={0.1} onChange={v => updateSetting("tpPercent", v)} icon={<Activity className="w-4 h-4 text-emerald-400" />} />
-          <SettingInput label="Stop Loss %" value={settings.slPercent} min={0.1} max={5} step={0.1} onChange={v => updateSetting("slPercent", v)} icon={<ShieldAlert className="w-4 h-4 text-rose-400" />} />
+          <SettingInput label="SL risk reference %" value={settings.slPercent} min={0.1} max={5} step={0.1} onChange={v => updateSetting("slPercent", v)} icon={<ShieldAlert className="w-4 h-4 text-rose-400" />} />
           <SettingInput label="Trailing Stop %" value={settings.trailingStopPercent} min={0.1} max={5} step={0.1} onChange={v => updateSetting("trailingStopPercent", v)} icon={<Flame className="w-4 h-4 text-amber-400" />} />
         </div>
       </div>

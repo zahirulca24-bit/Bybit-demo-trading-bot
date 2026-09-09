@@ -40,7 +40,7 @@ export function StrategyPage({
   const [selectedSymbol, setSelectedSymbol] = useState<string>("BTCUSDT");
   const [activeTab, setActiveTab] = useState<"pipeline" | "5m_grid" | "turnover">("pipeline");
   const [pipelineData, setPipelineData] = useState<PipelineState | null>(null);
-  const [isPipelineScanning, setIsPipelineScanning] = useState<boolean>(false);
+  const [isPipelineScanning, setIsPipelineScanning] = useState<boolean>(true);
 
   const activeSymbol = selectedSymbol || watchlist[0] || "BTCUSDT";
 
@@ -64,63 +64,6 @@ export function StrategyPage({
     return () => clearInterval(interval);
   }, []);
 
-  const strictGates = [
-    {
-      gateNumber: 1,
-      name: "24h Turnover",
-      ruleDescription: "Gate 1: Min $25M 24h turnover",
-      status: "Passed" as const,
-      inputCount: 40,
-      passCount: 35,
-      passRatePercent: 88,
-    },
-    {
-      gateNumber: 2,
-      name: "EMA50/EMA200 Trend",
-      ruleDescription: "Gate 2: EMA50/EMA200 direction + confirmed price correct side of EMA50",
-      status: "Filtering" as const,
-      inputCount: 35,
-      passCount: 26,
-      passRatePercent: 74,
-    },
-    {
-      gateNumber: 3,
-      name: "Orderbook Spread",
-      ruleDescription: "Gate 3: Spread <= 0.08%",
-      status: "Filtering" as const,
-      inputCount: 26,
-      passCount: 20,
-      passRatePercent: 77,
-    },
-    {
-      gateNumber: 4,
-      name: "5m ATR",
-      ruleDescription: "Gate 4: ATR 0.30%–1.20%",
-      status: "Filtering" as const,
-      inputCount: 20,
-      passCount: 14,
-      passRatePercent: 70,
-    },
-    {
-      gateNumber: 5,
-      name: "Open Interest",
-      ruleDescription: "Gate 5: Bybit real 1h OI expansion >= +0.50%; unavailable = fail",
-      status: "Filtering" as const,
-      inputCount: 14,
-      passCount: 9,
-      passRatePercent: 64,
-    },
-    {
-      gateNumber: 6,
-      name: "5m RSI (14)",
-      ruleDescription: "Gate 6: RSI Long 50–64 / Short 36–50 on confirmed candle",
-      status: "Active" as const,
-      inputCount: 9,
-      passCount: 3,
-      passRatePercent: 33,
-    },
-  ];
-
   const executionControls = [
     "Breakout = soft bonus only",
     "Max positions 3",
@@ -130,6 +73,11 @@ export function StrategyPage({
     "Daily -$50 net entry breaker",
     "3 losses => 30m pause",
     "Breaker blocks new entries only",
+    "Adaptive SL: ATR14 confirmed 5m, multiplier 1.20x–1.50x",
+    "Structure: recent 6 confirmed 5m candles; swing ± 0.15×ATR",
+    "Initial SL distance: 1.00%–1.80%; wider SL reduces notional",
+    "BE/trailing trigger: max(1.00%, initial SL distance, 1.25×ATR%)",
+    "Trailing starts after the same threshold and only tightens risk",
     "SL never widened",
   ];
 
@@ -168,10 +116,10 @@ export function StrategyPage({
       {activeTab === "pipeline" && (
         <div className="space-y-6">
           <SixGatePipelineVisualizer
-            gates={pipelineData?.gates || strictGates}
-            totalDiscovered={pipelineData?.totalDiscovered || 40}
-            passedAllCount={pipelineData?.passedAllCount || 3}
-            activeSignalsCount={pipelineData?.activeSignalsCount || 3}
+            gates={pipelineData?.gates ?? []}
+            totalDiscovered={pipelineData?.totalDiscovered ?? null}
+            passedAllCount={pipelineData?.passedAllCount ?? null}
+            activeSignalsCount={pipelineData?.activeSignalsCount ?? null}
             isScanning={isPipelineScanning}
             onRefresh={() => fetchPipeline(true)}
           />
@@ -252,7 +200,7 @@ export function StrategyPage({
                 <div key={sym} onClick={() => setSelectedSymbol(sym)} className={`flex items-center justify-between p-2 rounded-lg text-xs cursor-pointer border transition-colors ${activeSymbol === sym ? "bg-blue-950/40 border-blue-500/40 text-white" : "bg-neutral-950 border-neutral-800/80 text-neutral-300 hover:border-neutral-700"}`}>
                   <span className="font-mono font-bold">{sym}</span>
                   <div className="flex items-center gap-2">
-                    {price && <span className="font-mono text-neutral-400">${price >= 1000 ? price.toLocaleString(undefined, { minimumFractionDigits: 2 }) : price.toFixed(2)}</span>}
+                    {price !== undefined && Number.isFinite(price) && <span className="font-mono text-neutral-400">${price >= 1000 ? price.toLocaleString(undefined, { minimumFractionDigits: 2 }) : price.toFixed(2)}</span>}
                     <button onClick={(e) => { e.stopPropagation(); toggleWatchlist(sym, true); }} className="text-neutral-500 hover:text-rose-400 p-0.5 cursor-pointer">
                       <X className="w-3.5 h-3.5" />
                     </button>

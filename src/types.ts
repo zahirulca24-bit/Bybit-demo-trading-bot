@@ -124,7 +124,7 @@ export interface PipelineScannedSymbol {
   ema50_15m: number; ema200_15m: number; trend15m: "Bullish HTF" | "Bearish HTF" | "Neutral"; isTrend15mValid: boolean;
   bidPrice: number; askPrice: number; spreadPercent: number; isSpreadValid: boolean;
   atr5m: number; atr5mPercent: number; isAtrValid: boolean;
-  openInterest: number; oiChangePercent1h: number; isOiValid: boolean;
+  openInterest: number; oiChangePercent1h: number; oiAvailable?: boolean; isOiValid: boolean;
   rsi14_5m: number; rsiZone5m: RsiZone5m; isRsi5mValid: boolean;
   gates: GateResultSummary; pipelineStatus: "Passed All 6 Gates" | string; signalAction: "Grade A Long" | "Grade A Short" | "Standby"; actionType: "LONG" | "SHORT" | "STANDBY"; lastUpdated: number;
 }

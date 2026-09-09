@@ -151,7 +151,7 @@ export function TerminalPage({
           </div>
           <div>
             <p className="text-3xl font-semibold tracking-tight text-white">
-              ${!isNaN(parseFloat(balance || "0")) ? parseFloat(balance || "0").toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "0.00"}
+              {balance.trim() !== "" && Number.isFinite(Number(balance)) ? `$${Number(balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—"}
             </p>
             <p className="text-xs text-neutral-500 mt-1">USDT Unified Account</p>
           </div>
@@ -182,7 +182,7 @@ export function TerminalPage({
                  </p>
                  <p className="text-xs text-emerald-400 mt-1 flex items-center gap-1">
                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                   1m Stream
+                   Live ticker stream
                  </p>
                </div>
             </div>
@@ -262,7 +262,7 @@ export function TerminalPage({
         <div className="p-0">
           {positions.length === 0 ? (
             <div className="p-8 text-center text-neutral-500">
-              No open positions. Strategy is monitoring 1-minute streams for entry triggers, or use "Quick Test Long" above.
+              No open positions. Strict automated entries use confirmed 5m scanner signals; live ticker data remains for monitoring.
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -281,7 +281,8 @@ export function TerminalPage({
                 </thead>
                 <tbody className="divide-y divide-neutral-800">
                   {positions.map((pos, i) => {
-                    const entryPrice = parseFloat(String(pos.avgPrice || pos.entryPrice || "0"));
+                    const entryRaw = pos.avgPrice ?? pos.entryPrice;
+                    const entryPrice = entryRaw !== undefined ? Number(entryRaw) : Number.NaN;
                     const markPrice = pos.markPrice ? parseFloat(String(pos.markPrice)) : prices[pos.symbol];
                     const isLong = pos.side === "Buy";
                     const isClosing = closingSymbol === pos.symbol;
@@ -302,7 +303,7 @@ export function TerminalPage({
                         </td>
                         <td className="px-6 py-4 text-neutral-300 font-mono">{pos.size}</td>
                         <td className="px-6 py-4 text-neutral-300 font-mono">
-                          {!isNaN(entryPrice) ? `$${entryPrice.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '$0.00'}
+                          {Number.isFinite(entryPrice) ? `$${entryPrice.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '—'}
                         </td>
                         <td className="px-6 py-4 text-neutral-300 font-mono">
                           {markPrice !== undefined && markPrice !== null && !isNaN(markPrice) ? `$${markPrice.toLocaleString(undefined, { minimumFractionDigits: 2 })}` : '...'}
@@ -311,21 +312,9 @@ export function TerminalPage({
                           {isProfit ? '+' : ''}{pnlPercent.toFixed(2)}%
                         </td>
                         <td className="px-6 py-4">
-                          {pnlPercent >= 1.0 ? (
-                            <div className="flex items-center gap-2">
-                              <div className="w-16 h-1.5 bg-blue-900 rounded-full overflow-hidden">
-                                <div className="h-full bg-blue-500" style={{ width: '100%' }}></div>
-                              </div>
-                              <span className="text-xs text-blue-400 font-medium">Trailing Active (0.5%)</span>
-                            </div>
-                          ) : (
-                            <div className="flex items-center gap-2">
-                              <div className="w-16 h-1.5 bg-neutral-800 rounded-full overflow-hidden">
-                                <div className="h-full bg-neutral-600" style={{ width: `${Math.max(0, Math.min(100, pnlPercent * 100))}%` }}></div>
-                              </div>
-                              <span className="text-xs text-neutral-500">Waiting (+1.0%)</span>
-                            </div>
-                          )}
+                          <div className="max-w-[210px] text-xs text-neutral-400 leading-snug">
+                            Runtime-managed: BE/trailing begins only after max(1.00%, initial SL distance, 1.25×ATR%); never widens SL.
+                          </div>
                         </td>
                         <td className="px-6 py-4 text-right">
                           <button

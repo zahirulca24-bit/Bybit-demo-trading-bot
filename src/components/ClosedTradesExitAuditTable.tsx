@@ -29,19 +29,20 @@ export function ClosedTradesExitAuditTable({
   const filteredTrades = closedTrades.filter((t) => {
     if (filterType === "ALL") return true;
     if (filterType === "TP") return t.exitTrigger?.includes("TP");
-    if (filterType === "SL") return t.exitTrigger?.includes("SL") || t.pnl < 0;
+    if (filterType === "SL") return /(^|\b)SL(\b|$)|Stop Loss/i.test(t.exitTrigger || "");
     if (filterType === "TRAILING") return t.exitTrigger?.includes("Trailing");
     if (filterType === "MANUAL") return t.exitTrigger?.includes("Manual");
+    if (filterType === "OTHER") return /Unknown|Other/i.test(t.exitTrigger || "");
     return true;
   });
 
-  const getExitBadge = (trigger: string, pnl: number) => {
+  const getExitBadge = (trigger: string) => {
     const tr = trigger.toLowerCase();
     if (tr.includes("tp") || tr.includes("take profit")) {
       return (
         <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
           <Target className="w-3 h-3" />
-          {trigger || "TP1 (+1.5%)"}
+          {trigger}
         </span>
       );
     }
@@ -49,7 +50,7 @@ export function ClosedTradesExitAuditTable({
       return (
         <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-rose-500/10 text-rose-400 border border-rose-500/30">
           <ShieldAlert className="w-3 h-3" />
-          {trigger || "Hard SL (-1%)"}
+          {trigger}
         </span>
       );
     }
@@ -57,14 +58,14 @@ export function ClosedTradesExitAuditTable({
       return (
         <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-blue-500/10 text-blue-400 border border-blue-500/30">
           <Activity className="w-3 h-3" />
-          {trigger || "Trailing Stop"}
+          {trigger}
         </span>
       );
     }
     return (
       <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-bold bg-neutral-800 text-neutral-300 border border-neutral-700">
         <Clock className="w-3 h-3" />
-        {trigger || "Manual Close"}
+        {trigger || "Other / Unknown"}
       </span>
     );
   };
@@ -89,6 +90,7 @@ export function ClosedTradesExitAuditTable({
             { label: "Trailing Stop", value: "TRAILING" },
             { label: "Stop Loss", value: "SL" },
             { label: "Manual", value: "MANUAL" },
+            { label: "Other / Unknown", value: "OTHER" },
           ].map((f) => (
             <button
               key={f.value}
@@ -103,6 +105,10 @@ export function ClosedTradesExitAuditTable({
             </button>
           ))}
         </div>
+      </div>
+
+      <div className="px-4 py-2.5 border-b border-neutral-800 bg-neutral-950/40 text-[11px] text-neutral-500">
+        Unknown means Bybit metadata was insufficient to classify the exit reliably. The app does not infer exit reason from PnL sign.
       </div>
 
       {/* Table Body */}
@@ -182,7 +188,7 @@ export function ClosedTradesExitAuditTable({
 
                     {/* Exit Trigger Type Badge */}
                     <td className="py-3.5 px-4">
-                      {getExitBadge(trade.exitTrigger, trade.pnl)}
+                      {getExitBadge(trade.exitTrigger)}
                       {trade.slDiagnosticReason && (
                         <div className="text-[10px] text-neutral-500 mt-1">
                           Cause: {trade.slDiagnosticReason}

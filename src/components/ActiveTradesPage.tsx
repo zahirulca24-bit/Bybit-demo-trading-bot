@@ -39,35 +39,6 @@ interface ActiveTradesPageProps {
   onRefresh?: () => Promise<void> | void;
 }
 
-const EMPTY_ANALYTICS: DailyTradeAnalytics = {
-  tradingDay: "UTC",
-  tradingDayStartUtc: 0,
-  windowEndUtc: 0,
-  todayOpenedCount: 0,
-  todayClosedCount: 0,
-  winningTradesCount: 0,
-  losingTradesCount: 0,
-  activePositionsCount: 0,
-  maxSlots: 3,
-  tpHitCount: 0,
-  trailingStopCount: 0,
-  slHitCount: 0,
-  manualCloseCount: 0,
-  otherExitCount: 0,
-  breakEvenCount: 0,
-  realizedPnlToday: 0,
-  unrealizedPnlToday: 0,
-  netDailyPnl: 0,
-  slAudit: {
-    primarySlCause: "No Stop Loss exits today",
-    worstPerformingSymbol: "None",
-    slCountForWorst: 0,
-    averageTimeToSlSeconds: 0,
-    strategyFeedbackNote: "UTC daily analytics are awaiting data.",
-    totalLossUsdt: 0,
-  },
-  closedTrades: [],
-};
 
 export function ActiveTradesPage({
   positions = [],
@@ -76,7 +47,7 @@ export function ActiveTradesPage({
   onRefresh,
 }: ActiveTradesPageProps) {
   const [activePositions, setActivePositions] = useState<FormattedPosition[]>([]);
-  const [analytics, setAnalytics] = useState<DailyTradeAnalytics>(EMPTY_ANALYTICS);
+  const [analytics, setAnalytics] = useState<DailyTradeAnalytics | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [closingSymbol, setClosingSymbol] = useState<string | null>(null);
   const [isPanicClosing, setIsPanicClosing] = useState(false);
@@ -84,8 +55,8 @@ export function ActiveTradesPage({
   const [panicSuccessMessage, setPanicSuccessMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const maxSlots = analytics.maxSlots || settings?.maxPositions || 3;
-  const defaultLev = settings?.leverage || 10;
+  const maxSlots = analytics?.maxSlots ?? settings?.maxPositions ?? 3;
+  const defaultLev = settings?.leverage ?? 10;
 
   const fetchActivePositions = async () => {
     setIsLoading(true);
@@ -142,21 +113,18 @@ export function ActiveTradesPage({
     },
     { totalPositionValue: 0, totalMargin: 0, unrealized: 0 }
   );
-  const calculatedRoiValue = totalMargin > 0 ? (analytics.unrealizedPnlToday / totalMargin) * 100 : 0;
+  const calculatedRoiValue = analytics && totalMargin > 0 ? (analytics.unrealizedPnlToday / totalMargin) * 100 : null;
 
-  const totalRealizedPnl = Number(analytics.realizedPnlToday || 0);
-  const totalUnrealizedPnl = Number(analytics.unrealizedPnlToday || 0);
-  const netDailyPnl = Number(analytics.netDailyPnl || 0);
-  const isNetPositive = netDailyPnl >= 0;
+  const totalRealizedPnl = analytics ? Number(analytics.realizedPnlToday) : null;
+  const totalUnrealizedPnl = analytics ? Number(analytics.unrealizedPnlToday) : null;
+  const netDailyPnl = analytics ? Number(analytics.netDailyPnl) : null;
+  const isNetPositive = netDailyPnl !== null && netDailyPnl >= 0;
   const maxLossLimit = settings?.globalMaxLossUsdt ?? -50;
-  const isApproachingLimit = netDailyPnl <= maxLossLimit * 0.8;
+  const isApproachingLimit = netDailyPnl !== null && netDailyPnl <= maxLossLimit * 0.8;
 
-  const exitBreakdownTotal =
-    analytics.tpHitCount +
-    analytics.slHitCount +
-    analytics.trailingStopCount +
-    analytics.manualCloseCount +
-    analytics.otherExitCount;
+  const exitBreakdownTotal = analytics
+    ? analytics?.tpHitCount + analytics?.slHitCount + analytics?.trailingStopCount + analytics?.manualCloseCount + analytics?.otherExitCount
+    : null;
 
   const handleCloseSingle = async (symbol: string) => {
     setClosingSymbol(symbol);
@@ -258,7 +226,7 @@ export function ActiveTradesPage({
             <span className="text-xs text-neutral-400 font-medium">Today's Total Opened</span>
             <Zap className="w-4 h-4 text-amber-400" />
           </div>
-          <p className="text-2xl font-bold text-white font-mono">{analytics.todayOpenedCount}</p>
+          <p className="text-2xl font-bold text-white font-mono">{analytics?.todayOpenedCount}</p>
           <p className="text-[11px] text-neutral-500 mt-2">Opened since 00:00 UTC today</p>
         </div>
 
@@ -267,8 +235,8 @@ export function ActiveTradesPage({
             <span className="text-xs text-neutral-400 font-medium">Closed Trades Today</span>
             <FileText className="w-4 h-4 text-blue-400" />
           </div>
-          <p className="text-2xl font-bold text-white font-mono">{analytics.todayClosedCount}</p>
-          <p className="text-[11px] text-neutral-500 mt-2">Wins {analytics.winningTradesCount} / Losses {analytics.losingTradesCount}</p>
+          <p className="text-2xl font-bold text-white font-mono">{analytics?.todayClosedCount}</p>
+          <p className="text-[11px] text-neutral-500 mt-2">Wins {analytics?.winningTradesCount} / Losses {analytics?.losingTradesCount}</p>
         </div>
 
         <div className="bg-neutral-900 border border-neutral-800 p-5 rounded-xl">
@@ -288,28 +256,28 @@ export function ActiveTradesPage({
             <Target className="w-4 h-4 text-purple-400" />
           </div>
           <div className="grid grid-cols-2 gap-1.5 font-mono">
-            <StatBadge label="TP" value={analytics.tpHitCount} className="text-emerald-300" />
-            <StatBadge label="SL" value={analytics.slHitCount} className="text-rose-300" />
-            <StatBadge label="Trailing" value={analytics.trailingStopCount} className="text-blue-300" />
-            <StatBadge label="Manual" value={analytics.manualCloseCount} className="text-neutral-200" />
-            <div className="col-span-2"><StatBadge label="Other / Unknown" value={analytics.otherExitCount} className="text-amber-300" /></div>
+            <StatBadge label="TP" value={analytics?.tpHitCount} className="text-emerald-300" />
+            <StatBadge label="SL" value={analytics?.slHitCount} className="text-rose-300" />
+            <StatBadge label="Trailing" value={analytics?.trailingStopCount} className="text-blue-300" />
+            <StatBadge label="Manual" value={analytics?.manualCloseCount} className="text-neutral-200" />
+            <div className="col-span-2"><StatBadge label="Other / Unknown" value={analytics?.otherExitCount} className="text-amber-300" /></div>
           </div>
-          <p className={`text-[10px] mt-1.5 text-center ${exitBreakdownTotal === analytics.todayClosedCount ? "text-neutral-500" : "text-rose-400"}`}>
-            Categorized {exitBreakdownTotal} / {analytics.todayClosedCount} closed
+          <p className={`text-[10px] mt-1.5 text-center ${analytics && exitBreakdownTotal === analytics.todayClosedCount ? "text-neutral-500" : "text-rose-400"}`}>
+            Categorized {exitBreakdownTotal ?? "—"} / {analytics?.todayClosedCount ?? "—"} closed
           </p>
         </div>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-5 gap-4">
         <PnlCard label="Today's Realized PnL" value={totalRealizedPnl} />
-        <PnlCard label="Unrealized PnL" value={totalUnrealizedPnl} suffix={`ROI ${calculatedRoiValue >= 0 ? "+" : ""}${calculatedRoiValue.toFixed(2)}%`} />
+        <PnlCard label="Unrealized PnL" value={totalUnrealizedPnl} suffix={calculatedRoiValue === null ? undefined : `ROI ${calculatedRoiValue >= 0 ? "+" : ""}${calculatedRoiValue.toFixed(2)}%`} />
         <div className={`p-4 rounded-xl border ${isApproachingLimit ? "bg-rose-950/40 border-rose-500" : "bg-neutral-900 border-neutral-800"}`}>
           <div className="flex items-center justify-between mb-1">
             <span className="text-xs text-neutral-400 font-medium">Net Daily PnL</span>
             {isApproachingLimit && <AlertTriangle className="w-4 h-4 text-rose-500" />}
           </div>
           <span className={`text-xl font-bold font-mono ${isNetPositive ? "text-white" : "text-rose-400"}`}>
-            {netDailyPnl > 0 ? "+" : ""}${netDailyPnl.toFixed(2)}
+            {netDailyPnl === null ? "—" : `${netDailyPnl > 0 ? "+" : ""}$${netDailyPnl.toFixed(2)}`}
           </span>
         </div>
         <div className="bg-neutral-900 border border-neutral-800 p-4 rounded-xl">
@@ -395,8 +363,8 @@ export function ActiveTradesPage({
         </div>
       )}
 
-      <ClosedTradesExitAuditTable closedTrades={analytics.closedTrades} isLoading={isLoading} />
-      <SlDiagnosticsPanel slAudit={analytics.slAudit} closedTrades={analytics.closedTrades} slPercent={settings?.slPercent || 1.0} />
+      <ClosedTradesExitAuditTable closedTrades={analytics?.closedTrades ?? []} isLoading={isLoading || analytics === null} />
+      {analytics && <SlDiagnosticsPanel slAudit={analytics.slAudit} closedTrades={analytics.closedTrades} slPercent={settings?.slPercent ?? 1.0} />}
 
       {showPanicModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
@@ -422,22 +390,22 @@ export function ActiveTradesPage({
   );
 }
 
-function StatBadge({ label, value, className }: { label: string; value: number; className: string }) {
+function StatBadge({ label, value, className }: { label: string; value: number | undefined; className: string }) {
   return (
     <div className="bg-neutral-950 border border-neutral-800 px-2 py-1 rounded-md flex items-center justify-between">
       <span className="text-[10px] text-neutral-400 font-semibold">{label}:</span>
-      <span className={`text-xs font-bold ${className}`}>{value}</span>
+      <span className={`text-xs font-bold ${className}`}>{value ?? "—"}</span>
     </div>
   );
 }
 
-function PnlCard({ label, value, suffix }: { label: string; value: number; suffix?: string }) {
+function PnlCard({ label, value, suffix }: { label: string; value: number | null; suffix?: string }) {
   return (
-    <div className={`p-4 rounded-xl border ${value === 0 ? "bg-neutral-900 border-neutral-800" : value > 0 ? "bg-emerald-950/20 border-emerald-500/30" : "bg-rose-950/20 border-rose-500/30"}`}>
+    <div className={`p-4 rounded-xl border ${value === null || value === 0 ? "bg-neutral-900 border-neutral-800" : value > 0 ? "bg-emerald-950/20 border-emerald-500/30" : "bg-rose-950/20 border-rose-500/30"}`}>
       <span className="text-xs text-neutral-400 font-medium">{label}</span>
       <div className="flex items-baseline gap-2 mt-1">
-        <span className={`text-xl font-bold font-mono ${value === 0 ? "text-white" : value > 0 ? "text-emerald-400" : "text-rose-400"}`}>
-          {value > 0 ? "+" : ""}${value.toFixed(2)}
+        <span className={`text-xl font-bold font-mono ${value === null || value === 0 ? "text-white" : value > 0 ? "text-emerald-400" : "text-rose-400"}`}>
+          {value === null ? "—" : `${value > 0 ? "+" : ""}$${value.toFixed(2)}`}
         </span>
         {suffix && <span className="text-[10px] text-neutral-500 ml-auto">{suffix}</span>}
       </div>
