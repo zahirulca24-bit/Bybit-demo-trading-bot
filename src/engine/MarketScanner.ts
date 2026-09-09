@@ -3,6 +3,7 @@ import { EMA, RSI, ATR } from "technicalindicators";
 import { WebSocketEmitter } from "./TradingEngine";
 import { TelegramNotifier } from "./TelegramNotifier";
 import { ScannedMarketItem, ScannerState } from "../types";
+import { calculateEmaTimingQuality, calculateFinalSetupScore } from "../utils/emaTimingQuality";
 
 export interface ScannerTradeExecutor {
   getIsRunning: () => boolean;
@@ -17,7 +18,7 @@ export interface ScannerTradeExecutor {
     ema50: number,
     ema200: number,
     rsi: number,
-    quality?: { atr?: number; atrPercent?: number; oiExpansionPercent?: number; spreadPercent?: number; trendState?: string; breakoutBonus?: boolean; entryCandleDirection?: "Bullish" | "Bearish" | "Doji" }
+    quality?: { atr?: number; atrPercent?: number; oiExpansionPercent?: number; spreadPercent?: number; trendState?: string; breakoutBonus?: boolean; entryCandleDirection?: "Bullish" | "Bearish" | "Doji"; ema9?: number; ema21?: number; ema9Above21?: boolean; ema9Slope?: number; ema21Slope?: number; freshCross?: "bullish" | "bearish" | "none"; crossoverAgeCandles?: number | null; emaTimingScore?: number; finalSetupScore?: number; emaTimingState?: string; emaTimingChoppy?: boolean }
   ) => Promise<{ success: boolean; message: string; orderId?: string }>;
 }
 
@@ -98,7 +99,9 @@ export class MarketScanner {
       newItems.sort((a, b) => {
         const rank = (s: string) => s === "BUY_SIGNAL" || s === "SELL_SIGNAL" ? 0 : s === "IN_POSITION" ? 1 : 2;
         const diff = rank(a.signal) - rank(b.signal);
-        return diff !== 0 ? diff : b.turnover24h - a.turnover24h;
+        if (diff !== 0) return diff;
+        const qualityDiff = (b.finalSetupScore ?? 0) - (a.finalSetupScore ?? 0);
+        return qualityDiff !== 0 ? qualityDiff : b.turnover24h - a.turnover24h;
       });
       this.scannedItems = newItems;
       this.lastScanTime = Date.now();
@@ -166,6 +169,16 @@ export class MarketScanner {
       if (gatePassed === 4 && oiPositive) gatePassed = 5;
 
       const currentRsi = rsiList[rsiList.length - 1];
+      const timingSide = trend15m === "Bullish HTF" ? "LONG" : trend15m === "Bearish HTF" ? "SHORT" : null;
+      const emaTiming = timingSide ? calculateEmaTimingQuality(closes5m, timingSide) : {
+        available: false as const,
+        freshCross: "none" as const,
+        crossoverAgeCandles: null,
+        emaTimingScore: 0,
+        timingState: "Unavailable" as const,
+        choppy: false,
+        chopPenalty: 0,
+      };
       let signal: ScannedMarketItem["signal"] = "WAITING";
       let signalReason = `Rejected at Gate ${Math.min(gatePassed + 1, 6)}`;
       const previousCandle = closed5m[closed5m.length - 2];
@@ -182,12 +195,15 @@ export class MarketScanner {
       if (gatePassed === 5 && trend15m === "Bullish HTF" && currentRsi >= 50 && currentRsi <= 64 && longSoftConfirmed) {
         gatePassed = 6;
         signal = "BUY_SIGNAL";
-        signalReason = `Grade A Long: RSI ${currentRsi.toFixed(1)} | bullish close confirmation${breakoutBonusLong ? " + breakout bonus" : ""}`;
+        signalReason = `Strict Long: RSI ${currentRsi.toFixed(1)} | bullish confirmed 5m candle${breakoutBonusLong ? " + breakout bonus" : ""} | EMA9/21 timing ${emaTiming.available ? `${emaTiming.emaTimingScore.toFixed(2)}/2` : "Unavailable"}`;
       } else if (gatePassed === 5 && trend15m === "Bearish HTF" && currentRsi >= 36 && currentRsi <= 50 && shortSoftConfirmed) {
         gatePassed = 6;
         signal = "SELL_SIGNAL";
-        signalReason = `Grade A Short: RSI ${currentRsi.toFixed(1)} | bearish close confirmation${breakoutBonusShort ? " + breakdown bonus" : ""}`;
+        signalReason = `Strict Short: RSI ${currentRsi.toFixed(1)} | bearish confirmed 5m candle${breakoutBonusShort ? " + breakdown bonus" : ""} | EMA9/21 timing ${emaTiming.available ? `${emaTiming.emaTimingScore.toFixed(2)}/2` : "Unavailable"}`;
       }
+
+      const selectedBreakoutBonus = trend15m === "Bullish HTF" ? breakoutBonusLong : trend15m === "Bearish HTF" ? breakoutBonusShort : false;
+      const finalSetupScore = gatePassed === 6 ? calculateFinalSetupScore(emaTiming.emaTimingScore, selectedBreakoutBonus) : gatePassed;
 
       const inPosition = this.executor.activePositions.some((p) => p.symbol === symbol && Number(p.size || 0) > 0);
       if (inPosition) {
@@ -205,8 +221,19 @@ export class MarketScanner {
         highPrice24h: ticker.highPrice24h,
         lowPrice24h: ticker.lowPrice24h,
         rsi: currentRsi,
-        ema9: ema50,
-        ema21: ema200,
+        ema50,
+        ema200,
+        ema9: emaTiming.ema9,
+        ema21: emaTiming.ema21,
+        ema9Above21: emaTiming.ema9Above21,
+        ema9Slope: emaTiming.ema9Slope,
+        ema21Slope: emaTiming.ema21Slope,
+        freshCross: emaTiming.freshCross,
+        crossoverAgeCandles: emaTiming.crossoverAgeCandles,
+        emaTimingScore: emaTiming.emaTimingScore,
+        emaTimingState: emaTiming.timingState,
+        emaTimingChoppy: emaTiming.choppy,
+        finalSetupScore,
         trend: trend15m === "Bullish HTF" ? "Bullish" : trend15m === "Bearish HTF" ? "Bearish" : "Neutral",
         trend15m,
         spreadPcnt,
@@ -214,7 +241,7 @@ export class MarketScanner {
         atrPcnt,
         oiPositive,
         oiChangePercent: oiMetric.changePercent,
-        breakoutBonus: trend15m === "Bullish HTF" ? breakoutBonusLong : trend15m === "Bearish HTF" ? breakoutBonusShort : false,
+        breakoutBonus: selectedBreakoutBonus,
         entryCandleDirection,
         gatePassed,
         signal,
@@ -235,8 +262,8 @@ export class MarketScanner {
       }
       const side: "Buy" | "Sell" = item.signal === "SELL_SIGNAL" ? "Sell" : "Buy";
       const price = item.price || item.lastPrice;
-      this.emitter.log(`⚡ [Strict Scanner] ${side === "Buy" ? "LONG" : "SHORT"} ${item.symbol} | Slot ${this.executor.activePositions.length + 1}/${this.executor.settings?.maxPositions || 3} | RSI ${item.rsi.toFixed(1)}`);
-      const result = await this.executor.executeScannerEntry(item.symbol, side, price, item.ema9, item.ema21, item.rsi, {
+      this.emitter.log(`⚡ [Strict Scanner] ${side === "Buy" ? "LONG" : "SHORT"} ${item.symbol} | Slot ${this.executor.activePositions.length + 1}/${this.executor.settings?.maxPositions || 3} | RSI ${item.rsi.toFixed(1)} | EMA timing ${item.emaTimingScore?.toFixed(2) ?? "N/A"}/2 | Setup ${item.finalSetupScore?.toFixed(2) ?? "N/A"}`);
+      const result = await this.executor.executeScannerEntry(item.symbol, side, price, item.ema50, item.ema200, item.rsi, {
         atr: item.atr,
         atrPercent: item.atrPcnt,
         oiExpansionPercent: item.oiChangePercent,
@@ -244,8 +271,19 @@ export class MarketScanner {
         trendState: item.trend15m,
         breakoutBonus: item.breakoutBonus,
         entryCandleDirection: item.entryCandleDirection,
+        ema9: item.ema9,
+        ema21: item.ema21,
+        ema9Above21: item.ema9Above21,
+        ema9Slope: item.ema9Slope,
+        ema21Slope: item.ema21Slope,
+        freshCross: item.freshCross,
+        crossoverAgeCandles: item.crossoverAgeCandles,
+        emaTimingScore: item.emaTimingScore,
+        finalSetupScore: item.finalSetupScore,
+        emaTimingState: item.emaTimingState,
+        emaTimingChoppy: item.emaTimingChoppy,
       });
-      if (result.success) this.telegram.sendScannerSignal(item.symbol, price, item.rsi, item.ema9, item.ema21, true);
+      if (result.success) this.telegram.sendScannerSignal(item.symbol, side === "Buy" ? "LONG" : "SHORT", price, item.rsi, item.ema9, item.ema21, item.freshCross, item.crossoverAgeCandles, item.emaTimingScore, item.finalSetupScore, true);
     }
   }
 

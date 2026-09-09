@@ -65,6 +65,8 @@ export function StrategyPage({
   }, []);
 
   const executionControls = [
+    "EMA50/200 = hard trend filter",
+    "EMA9/21 = soft entry timing / quality confirmation",
     "Breakout = soft bonus only",
     "Max positions 3",
     "$50 margin at 10x (~$500 notional)",
@@ -97,7 +99,7 @@ export function StrategyPage({
                 <Layers className="w-3.5 h-3.5" /> 6-Gate Pipeline
               </button>
               <button onClick={() => setActiveTab("5m_grid")} className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${activeTab === "5m_grid" ? "bg-blue-600 text-white shadow-sm" : "text-neutral-400 hover:text-white"}`}>
-                <Zap className="w-3.5 h-3.5" /> 5m Momentum Grid
+                <Zap className="w-3.5 h-3.5" /> Legacy Info
               </button>
               <button onClick={() => setActiveTab("turnover")} className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${activeTab === "turnover" ? "bg-blue-600 text-white shadow-sm" : "text-neutral-400 hover:text-white"}`}>
                 <Activity className="w-3.5 h-3.5" /> Turnover Rankings
@@ -171,7 +173,7 @@ export function StrategyPage({
           </div>
 
           <div className="pt-3 border-t border-neutral-800 text-[11px] text-neutral-500 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1">
-            <span>Confirmed closed candles only</span>
+            <span>Confirmed closed candles only · EMA9/21 never blocks an otherwise valid six-gate setup</span>
             <span>Existing positions remain managed when entry breaker is active</span>
           </div>
         </div>

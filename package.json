@@ -13,7 +13,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test:quality": "tsx src/utils/tradeQuality.test.ts"
+    "test:quality": "tsx src/utils/tradeQuality.test.ts",
+    "test:ema-timing": "tsx src/utils/emaTimingQuality.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

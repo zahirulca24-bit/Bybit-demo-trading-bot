@@ -80,13 +80,13 @@ export function Scanner5mPanel({ onSelectSymbol }: Scanner5mPanelProps) {
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="font-bold text-white text-base">5-Minute Automated Candle-Close Scanner</h2>
+              <h2 className="font-bold text-white text-base">Legacy / Informational Scanner</h2>
               <span className="text-[10px] bg-indigo-500/20 text-indigo-300 font-semibold px-2 py-0.5 rounded border border-indigo-500/30">
-                Cron: 3s Post 5m Close
+                No order execution
               </span>
             </div>
             <p className="text-xs text-neutral-400">
-              Triggered via node-cron (<code>3 */5 * * * *</code>) on finalized 5m candles to guarantee non-repainting signals.
+              Manual informational snapshot only. The official auto-entry strategy is the strict six-gate scanner; this panel cannot execute orders.
             </p>
           </div>
         </div>
@@ -214,9 +214,9 @@ export function Scanner5mPanel({ onSelectSymbol }: Scanner5mPanelProps) {
       ) : (
         <div className="bg-neutral-950 border border-neutral-800/80 rounded-xl p-6 text-center text-neutral-400">
           <ShieldCheck className="w-8 h-8 text-neutral-600 mx-auto mb-2" />
-          <p className="text-sm font-medium text-neutral-300">No active 5m breakout signals right now</p>
+          <p className="text-sm font-medium text-neutral-300">No legacy informational signals</p>
           <p className="text-xs text-neutral-500 mt-1">
-            The scanner automatically scans candles for 50/200 EMA alignment, RSI pullbacks/crossovers, and 20-period volume confirmation.
+            This legacy panel is not the official strategy and cannot execute orders. Use the strict six-gate scanner for production auto-entry state.
           </p>
         </div>
       )}

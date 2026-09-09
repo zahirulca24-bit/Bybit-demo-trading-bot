@@ -89,6 +89,17 @@ export interface ScannerEntryQualityContext {
   trendState?: string;
   breakoutBonus?: boolean;
   entryCandleDirection?: "Bullish" | "Bearish" | "Doji";
+  ema9?: number;
+  ema21?: number;
+  ema9Above21?: boolean;
+  ema9Slope?: number;
+  ema21Slope?: number;
+  freshCross?: "bullish" | "bearish" | "none";
+  crossoverAgeCandles?: number | null;
+  emaTimingScore?: number;
+  finalSetupScore?: number;
+  emaTimingState?: string;
+  emaTimingChoppy?: boolean;
 }
 
 type PositionRiskState = {
@@ -486,7 +497,7 @@ export class TradingEngine {
       await this.ensureLeverage(targetSymbol);
 
       this.emitter.log(`⚡ [Scanner Execution] ${side === "Buy" ? "LONG" : "SHORT"} ${targetSymbol} | Margin cap $${this.settings.positionMarginUsdt} | Used ~$${actualMargin.toFixed(2)} | Notional ~$${actualNotional.toFixed(2)} | TP ${takeProfit} | SL ${stopLoss}`);
-      this.emitter.log(`[Trade Quality] ${targetSymbol} RSI=${rsi.toFixed(1)} ATR%=${stopPlan.atrPercent.toFixed(3)} OI=${quality?.oiExpansionPercent?.toFixed(3) ?? "N/A"}% Spread=${quality?.spreadPercent?.toFixed(3) ?? "N/A"}% Trend=${quality?.trendState ?? "N/A"} BreakoutBonus=${Boolean(quality?.breakoutBonus)} Candle=${quality?.entryCandleDirection ?? "N/A"} SL=${stopPlan.stopDistancePercent.toFixed(3)}% (${stopPlan.stopDistanceAtrMultiple.toFixed(2)} ATR) Reason=${stopPlan.reason}`);
+      this.emitter.log(`[Trade Quality] ${targetSymbol} RSI=${rsi.toFixed(1)} ATR%=${stopPlan.atrPercent.toFixed(3)} OI=${quality?.oiExpansionPercent?.toFixed(3) ?? "N/A"}% Spread=${quality?.spreadPercent?.toFixed(3) ?? "N/A"}% Trend=${quality?.trendState ?? "N/A"} EMA9=${quality?.ema9?.toFixed(6) ?? "N/A"} EMA21=${quality?.ema21?.toFixed(6) ?? "N/A"} Timing=${quality?.emaTimingScore?.toFixed(2) ?? "N/A"}/2 Cross=${quality?.freshCross ?? "none"}@${quality?.crossoverAgeCandles ?? "N/A"} Setup=${quality?.finalSetupScore?.toFixed(2) ?? "N/A"} BreakoutBonus=${Boolean(quality?.breakoutBonus)} Candle=${quality?.entryCandleDirection ?? "N/A"} SL=${stopPlan.stopDistancePercent.toFixed(3)}% (${stopPlan.stopDistanceAtrMultiple.toFixed(2)} ATR) Reason=${stopPlan.reason}`);
       const orderRes = await this.bybit.submitOrder({
         category: "linear",
         symbol: targetSymbol,
@@ -528,6 +539,17 @@ export class TradingEngine {
           trendState: quality?.trendState ?? null,
           breakoutBonus: Boolean(quality?.breakoutBonus),
           entryCandleDirection: quality?.entryCandleDirection ?? null,
+          ema9: quality?.ema9 ?? null,
+          ema21: quality?.ema21 ?? null,
+          ema9Above21: quality?.ema9Above21 ?? null,
+          ema9Slope: quality?.ema9Slope ?? null,
+          ema21Slope: quality?.ema21Slope ?? null,
+          freshCross: quality?.freshCross ?? "none",
+          crossoverAgeCandles: quality?.crossoverAgeCandles ?? null,
+          emaTimingScore: quality?.emaTimingScore ?? 0,
+          finalSetupScore: quality?.finalSetupScore ?? 6,
+          emaTimingState: quality?.emaTimingState ?? "Unavailable",
+          emaTimingChoppy: quality?.emaTimingChoppy ?? false,
           slDistancePercent: stopPlan.stopDistancePercent,
           slDistanceAtrMultiple: stopPlan.stopDistanceAtrMultiple,
           slReason: stopPlan.reason,

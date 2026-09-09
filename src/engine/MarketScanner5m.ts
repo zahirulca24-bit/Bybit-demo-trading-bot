@@ -42,7 +42,7 @@ export interface Scanner5mResult {
   candleTime: number;
 }
 
-export class MarketScanner5m {
+export class LegacyInformationalScanner5m {
   public symbols: string[] = [
     "BTCUSDT",
     "ETHUSDT",
@@ -82,11 +82,11 @@ export class MarketScanner5m {
     this.scanAllSymbols();
 
     this.cronTask = cron.schedule("3 */5 * * * *", async () => {
-      console.log(`[5m Candle Close Scheduler] Triggering scan at ${new Date().toISOString()} (3s post-close buffer)`);
+      console.log(`[Legacy / Informational Scanner] Triggering scan at ${new Date().toISOString()} (3s post-close buffer)`);
       await this.scanAllSymbols();
     });
 
-    console.log("[5m Candle Close Scheduler] Scheduled with pattern '3 */5 * * * *'");
+    console.log("[Legacy / Informational Scanner] Scheduled with pattern '3 */5 * * * *'");
   }
 
   public stopScheduler() {
@@ -127,14 +127,15 @@ export class MarketScanner5m {
         category: "linear",
         symbol: symbol.toUpperCase(),
         interval: "5",
-        limit: 100,
+        limit: 220,
       });
 
-      if (response.retCode !== 0 || !response.result?.list || response.result.list.length < 50) {
+      if (response.retCode !== 0 || !response.result?.list || response.result.list.length < 200) {
         return null;
       }
 
-      const rawList = [...response.result.list].reverse();
+      const now = Date.now();
+      const rawList = [...response.result.list].reverse().filter((c: any) => Number(c[0]) + 5 * 60 * 1000 <= now);
 
       const closes: number[] = [];
       const volumes: number[] = [];
@@ -147,12 +148,10 @@ export class MarketScanner5m {
       }
 
       const totalCandles = closes.length;
-      if (totalCandles < 50) return null;
+      if (totalCandles < 200) return null;
 
       const ema50Values = EMA.calculate({ period: 50, values: closes });
-      const ema200Values = closes.length >= 200
-        ? EMA.calculate({ period: 200, values: closes })
-        : EMA.calculate({ period: Math.min(100, closes.length), values: closes });
+      const ema200Values = EMA.calculate({ period: 200, values: closes });
 
       const rsiValues = RSI.calculate({ period: 14, values: closes });
 
