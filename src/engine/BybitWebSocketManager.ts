@@ -37,6 +37,7 @@ export class BybitWebSocketManager extends EventEmitter {
   private candleBuffers: Map<string, Candle[]> = new Map();
   private subscribedSymbols: Set<string> = new Set();
   private isConnected = false;
+  private privateAuthenticated = false;
   private reconnectAttempts = 0;
   private maxReconnectDelay = 30000;
   private lastMessageTime = Date.now();
@@ -121,6 +122,7 @@ export class BybitWebSocketManager extends EventEmitter {
     });
 
     this.wsClient.on("authenticated", (data: any) => {
+      this.privateAuthenticated = Boolean(data.success);
       if (data.success) {
         this.emit("log", `[Bybit WS Private] Authenticated successfully for account execution stream.`);
       } else {
@@ -137,6 +139,7 @@ export class BybitWebSocketManager extends EventEmitter {
 
     this.wsClient.on("close", (data: any) => {
       this.isConnected = false;
+      this.privateAuthenticated = false;
       const wsKey = data?.wsKey || "WS";
       this.emit("log", `[Bybit WS] Stream connection closed: ${wsKey}. Scheduling reconnect with backoff...`);
       this.emit("status", { status: "reconnecting" });
@@ -373,6 +376,8 @@ export class BybitWebSocketManager extends EventEmitter {
       }
     }
   }
+
+  public getRuntimeStatus() { return { connected: this.isConnected, privateAuthenticated: this.privateAuthenticated, lastMessageTime: this.lastMessageTime }; }
 
   public close() {
     if (this.wsClient) {

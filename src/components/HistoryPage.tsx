@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { History, RefreshCw, RotateCcw } from "lucide-react";
 import { Position, TradeHistory } from "../types";
+import { apiRequest, buildFreshAccountSnapshot } from "../utils/frontendContract";
 
-interface HistoryPageProps { history: TradeHistory[]; startingBalance?: number | null; }
+interface HistoryPageProps { history: TradeHistory[]; startingBalance?: number | null; source?: string | null; metadataCoverage?: string | null; }
 interface PerformanceBaseline { resetNumber: number; resetAt: number; walletBalance: number; estimatedEquity: number; cumulativeRealizedPnl: number; cumulativeTradeCount: number; }
 const BASELINE_STORAGE_KEY = "bybit-demo-performance-baselines-v1";
 const loadBaselines = (): PerformanceBaseline[] => { try { const value = JSON.parse(window.localStorage.getItem(BASELINE_STORAGE_KEY) || "[]"); return Array.isArray(value) ? value : []; } catch { return []; } };
@@ -11,20 +12,19 @@ const money = (value: unknown) => { const n = finite(value); return n === null ?
 const pct = (value: unknown) => { const n = finite(value); return n === null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`; };
 const price = (value: unknown) => { const n = finite(value); return n === null ? "—" : `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: n < 1 ? 6 : 4 })}`; };
 
-export function HistoryPage({ history, startingBalance = null }: HistoryPageProps) {
+export function HistoryPage({ history, startingBalance = null, source = null, metadataCoverage = null }: HistoryPageProps) {
   const [walletBalance, setWalletBalance] = useState<number | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
   const [baselines, setBaselines] = useState<PerformanceBaseline[]>(() => loadBaselines());
   const [resetting, setResetting] = useState(false);
+  const [baselineError, setBaselineError] = useState<string | null>(null);
   const refreshAccount = async () => {
-    const [balanceRes, positionsRes] = await Promise.all([
-      fetch("/api/balance").then(r => r.json()).catch(() => ({ success: false })),
-      fetch("/api/positions/active").then(r => r.json()).catch(() => ({ success: false })),
-    ]);
-    if (balanceRes.success) { const n = finite(balanceRes.balance); if (n !== null) setWalletBalance(n); }
-    if (positionsRes.success && Array.isArray(positionsRes.positions)) setPositions(positionsRes.positions);
+    const [balanceRes, positionsRes] = await Promise.all([apiRequest<any>("/api/balance"), apiRequest<any>("/api/positions/active")]);
+    const snapshot = buildFreshAccountSnapshot(balanceRes, positionsRes);
+    if (!snapshot) throw new Error("Fresh account snapshot is incomplete");
+    setWalletBalance(snapshot.walletBalance); setPositions(snapshot.positions as Position[]); return snapshot;
   };
-  useEffect(() => { void refreshAccount(); const timer = setInterval(() => void refreshAccount(), 5000); return () => clearInterval(timer); }, []);
+  useEffect(() => { void refreshAccount().catch(() => undefined); const timer = setInterval(() => void refreshAccount().catch(() => undefined), 5000); return () => clearInterval(timer); }, []);
 
   const knownPnlTrades = useMemo(() => history.filter(t => finite(t.realizedPnlUsdt ?? t.pnl) !== null), [history]);
   const totalClosedPnl = useMemo(() => knownPnlTrades.reduce((sum, t) => sum + (finite(t.realizedPnlUsdt ?? t.pnl) as number), 0), [knownPnlTrades]);
@@ -45,16 +45,18 @@ export function HistoryPage({ history, startingBalance = null }: HistoryPageProp
   const slCount = postResetTrades.filter(t => /SL|Stop Loss/i.test(t.reason || "")).length;
   const trailingCount = postResetTrades.filter(t => /Trailing/i.test(t.reason || "")).length;
   const persistBaselines = (next: PerformanceBaseline[]) => { setBaselines(next); window.localStorage.setItem(BASELINE_STORAGE_KEY, JSON.stringify(next)); };
-  const resetPerformanceBaseline = async () => { setResetting(true); await refreshAccount(); if (walletBalance !== null && estimatedEquity !== null) persistBaselines([...baselines, { resetNumber: baselines.length + 1, resetAt: Date.now(), walletBalance, estimatedEquity, cumulativeRealizedPnl: totalClosedPnl, cumulativeTradeCount: history.length }]); setResetting(false); };
+  const resetPerformanceBaseline = async () => { setResetting(true); setBaselineError(null); try { const fresh = await refreshAccount(); persistBaselines([...baselines, { resetNumber: baselines.length + 1, resetAt: Date.now(), walletBalance: fresh.walletBalance, estimatedEquity: fresh.estimatedEquity, cumulativeRealizedPnl: totalClosedPnl, cumulativeTradeCount: history.length }]); } catch (err: any) { setBaselineError(err?.message || "Unable to create a fresh account baseline"); } finally { setResetting(false); } };
   const allWins = history.filter(t => t.outcome === "WIN" || (finite(t.realizedPnlUsdt ?? t.pnl) !== null && (finite(t.realizedPnlUsdt ?? t.pnl) as number) > 0)).length;
   const allLosses = history.filter(t => t.outcome === "LOSS" || (finite(t.realizedPnlUsdt ?? t.pnl) !== null && (finite(t.realizedPnlUsdt ?? t.pnl) as number) < 0)).length;
   const allZeroUnknown = history.length - allWins - allLosses;
 
   return <div className="space-y-6">
     <header className="pb-4 border-b border-neutral-800 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
-      <div><h1 className="text-3xl font-bold text-white mb-2">Trade History & Performance Baseline</h1><p className="text-neutral-400">Exchange facts below come from paginated Bybit Closed PnL. Local DB data may only enrich matched strategy metadata.</p></div>
-      <button onClick={resetPerformanceBaseline} disabled={resetting || walletBalance === null || estimatedEquity === null} className="inline-flex items-center gap-2 rounded-xl bg-blue-600 disabled:opacity-50 px-4 py-2.5 text-sm font-semibold text-white">{resetting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />} Reset Performance Baseline</button>
+      <div><h1 className="text-3xl font-bold text-white mb-2">Trade History & Performance Baseline</h1><p className="text-neutral-400">Canonical exchange facts: {source || "Bybit Closed PnL"}. Local strategy metadata is merged only by stable identifiers · metadata {metadataCoverage || "unknown"}.</p></div>
+      <button onClick={resetPerformanceBaseline} disabled={resetting} className="inline-flex items-center gap-2 rounded-xl bg-blue-600 disabled:opacity-50 px-4 py-2.5 text-sm font-semibold text-white">{resetting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />} {activeBaseline ? `Create Reset #${activeBaseline.resetNumber + 1}` : "Create Reset #1"}</button>
     </header>
+    {baselineError && <div className="bg-rose-500/10 border border-rose-500/30 rounded-xl p-3 text-sm text-rose-300">{baselineError}</div>}
+    {activeBaseline ? <>
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
       <Metric label="Realized PnL USDT since reset" value={money(realizedSinceReset)} />
       <Metric label="Unrealized PnL USDT" value={money(unrealizedPnl)} />
@@ -66,6 +68,7 @@ export function HistoryPage({ history, startingBalance = null }: HistoryPageProp
       <Metric label="Average Realized PnL USDT" value={money(averagePnl)} />
       <Metric label="Wallet / estimated equity" value={walletBalance === null || estimatedEquity === null ? "—" : `$${walletBalance.toFixed(2)} / $${estimatedEquity.toFixed(2)}`} />
     </div>
+    </> : <div className="bg-blue-950/20 border border-blue-500/30 rounded-xl p-5"><p className="font-semibold text-white">No performance baseline yet</p><p className="text-sm text-neutral-400 mt-1">Create Reset #1 to start measuring realized PnL and net account change from a fresh account snapshot. No “since reset” metric is shown until a baseline exists.</p></div>}
     {activeBaseline && <div className="bg-blue-950/20 border border-blue-500/30 rounded-xl p-4 text-sm text-neutral-300">Active baseline: Reset #{activeBaseline.resetNumber} · {new Date(activeBaseline.resetAt).toLocaleString()} · wallet ${activeBaseline.walletBalance.toFixed(2)} · equity ${activeBaseline.estimatedEquity.toFixed(2)}</div>}
     <div className="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden">
       <div className="p-4 border-b border-neutral-800 flex items-center gap-2"><History className="w-5 h-5 text-neutral-400" /><h2 className="font-medium text-white">Bybit Closed PnL Log</h2><span className="ml-auto text-xs text-neutral-500">{history.length} Trades / {allWins} W / {allLosses} L / {allZeroUnknown} Zero-or-Unknown</span></div>

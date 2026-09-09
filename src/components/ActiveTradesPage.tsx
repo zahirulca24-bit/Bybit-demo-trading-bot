@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { DailyTradeAnalytics, Position, Settings } from "../types";
 import { ClosedTradesExitAuditTable } from "./ClosedTradesExitAuditTable";
+import { apiRequest } from "../utils/frontendContract";
 import { SlDiagnosticsPanel } from "./SlDiagnosticsPanel";
 
 export interface FormattedPosition {
@@ -55,8 +56,8 @@ export function ActiveTradesPage({
   const [panicSuccessMessage, setPanicSuccessMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const maxSlots = analytics?.maxSlots ?? settings?.maxPositions ?? 3;
-  const defaultLev = settings?.leverage ?? 10;
+  const maxSlots = analytics?.maxSlots ?? settings?.maxPositions ?? null;
+  const defaultLev = settings?.leverage ?? null;
 
   const fetchActivePositions = async () => {
     setIsLoading(true);
@@ -103,7 +104,7 @@ export function ActiveTradesPage({
       const pnl = Number(pos.unrealisedPnl || 0);
       const price = Number(pos.markPrice || pos.avgPrice || 0);
       const size = Number(pos.size || 0);
-      const leverage = Number(pos.leverage || defaultLev) || defaultLev;
+      const leverage = Number(pos.leverage || defaultLev);
       const value = price * size;
       const margin = leverage > 0 ? value / leverage : value;
       acc.totalPositionValue += Number.isFinite(value) ? value : 0;
@@ -119,8 +120,8 @@ export function ActiveTradesPage({
   const totalUnrealizedPnl = analytics?.unrealizedPnlToday ?? null;
   const netDailyPnl = analytics?.netDailyPnl ?? null;
   const isNetPositive = netDailyPnl !== null && netDailyPnl >= 0;
-  const maxLossLimit = settings?.globalMaxLossUsdt ?? -50;
-  const isApproachingLimit = netDailyPnl !== null && netDailyPnl <= maxLossLimit * 0.8;
+  const maxLossLimit = settings?.globalMaxLossUsdt ?? null;
+  const isApproachingLimit = netDailyPnl !== null && maxLossLimit !== null && netDailyPnl <= maxLossLimit * 0.8;
 
   const exitBreakdownTotal = analytics
     ? analytics?.tpHitCount + analytics?.slHitCount + analytics?.trailingStopCount + analytics?.manualCloseCount + analytics?.otherExitCount
@@ -144,20 +145,12 @@ export function ActiveTradesPage({
     setError(null);
     setPanicSuccessMessage(null);
     try {
-      const res = await fetch("/api/positions/close-all", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
-      const data = await res.json();
-      if (data.success) {
-        setPanicSuccessMessage(`Successfully closed ${data.closedCount || activePositions.length} active position(s) at Market Price.`);
-        setActivePositions([]);
-        setShowPanicModal(false);
-        if (onRefresh) await onRefresh();
-        setTimeout(() => setPanicSuccessMessage(null), 5000);
-      } else {
-        setError(data.error || "Failed to execute Panic Close All");
-      }
+      const data = await apiRequest<any>("/api/positions/close-all", { method: "POST", headers: { "Content-Type": "application/json" } });
+      setPanicSuccessMessage(`Successfully closed ${data.closedCount ?? activePositions.length} active position(s) at Market Price.`);
+      setActivePositions([]);
+      setShowPanicModal(false);
+      if (onRefresh) await onRefresh();
+      setTimeout(() => setPanicSuccessMessage(null), 5000);
     } catch (err: any) {
       setError(`Panic close error: ${err.message}`);
     } finally {

@@ -192,12 +192,23 @@ export class MarketScanner {
       const breakoutBonusShort = latestClose < Number(previousCandle?.[3] || 0);
       const entryCandleDirection: "Bullish" | "Bearish" | "Doji" = latestClose > latestOpen ? "Bullish" : latestClose < latestOpen ? "Bearish" : "Doji";
 
+      let gate6FailureReason: ScannedMarketItem["gate6FailureReason"] = null;
+      if (gatePassed === 5) {
+        const rsiPass = trend15m === "Bullish HTF" ? currentRsi >= 50 && currentRsi <= 64 : trend15m === "Bearish HTF" ? currentRsi >= 36 && currentRsi <= 50 : false;
+        const candlePass = trend15m === "Bullish HTF" ? longSoftConfirmed : trend15m === "Bearish HTF" ? shortSoftConfirmed : false;
+        if (trend15m === "Neutral HTF") gate6FailureReason = "NO_DIRECTIONAL_TREND";
+        else if (!rsiPass && !candlePass) gate6FailureReason = "RSI_AND_CANDLE_FAILED";
+        else if (!rsiPass) gate6FailureReason = "RSI_OUT_OF_RANGE";
+        else if (!candlePass) gate6FailureReason = "DIRECTIONAL_CANDLE_FAILED";
+      }
       if (gatePassed === 5 && trend15m === "Bullish HTF" && currentRsi >= 50 && currentRsi <= 64 && longSoftConfirmed) {
         gatePassed = 6;
+        gate6FailureReason = null;
         signal = "BUY_SIGNAL";
         signalReason = `Strict Long: RSI ${currentRsi.toFixed(1)} | bullish confirmed 5m candle${breakoutBonusLong ? " + breakout bonus" : ""} | EMA9/21 timing ${emaTiming.available ? `${emaTiming.emaTimingScore.toFixed(2)}/2` : "Unavailable"}`;
       } else if (gatePassed === 5 && trend15m === "Bearish HTF" && currentRsi >= 36 && currentRsi <= 50 && shortSoftConfirmed) {
         gatePassed = 6;
+        gate6FailureReason = null;
         signal = "SELL_SIGNAL";
         signalReason = `Strict Short: RSI ${currentRsi.toFixed(1)} | bearish confirmed 5m candle${breakoutBonusShort ? " + breakdown bonus" : ""} | EMA9/21 timing ${emaTiming.available ? `${emaTiming.emaTimingScore.toFixed(2)}/2` : "Unavailable"}`;
       }
@@ -246,6 +257,7 @@ export class MarketScanner {
         gatePassed,
         signal,
         signalReason,
+        gate6FailureReason,
         lastScannedAt: Date.now(),
       };
     } catch {
