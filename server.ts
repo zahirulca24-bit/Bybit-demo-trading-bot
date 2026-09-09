@@ -9,7 +9,6 @@ import dotenv from "dotenv";
 import { EMA } from "technicalindicators";
 import { TradingEngine } from "./src/engine/TradingEngine";
 import { LegacyInformationalScanner5m } from "./src/engine/MarketScanner5m";
-import { SixGateFilteringPipeline } from "./src/engine/SixGateFilteringPipeline";
 import { initDatabase, dbGetClosedTrades } from "./src/db";
 import { getUtcTradingDayWindow, normalizeTimestampMs } from "./src/utils/utcTradingDay";
 import { classifyClosedTradeExit } from "./src/utils/exitClassification";
@@ -49,9 +48,6 @@ async function startServer() {
   });
 
   const engine = new TradingEngine(bybit, io);
-  const pipelineEngine = new SixGateFilteringPipeline(bybit);
-  pipelineEngine.start();
-
   const scanner5m = new LegacyInformationalScanner5m(bybit);
   engine.emitter.log("[Legacy / Informational Scanner] Isolated from auto-entry and Telegram. Manual API inspection only.");
 
@@ -534,13 +530,13 @@ async function startServer() {
   });
 
   app.get("/api/scanner/state", (req, res) => {
-    res.json({ success: true, state: engine.scanner.getState() });
+    res.json({ success: true, state: engine.scanner.getState(), pipeline: engine.scanner.getPipelineState() });
   });
 
   app.post("/api/scanner/scan-now", async (req, res) => {
     try {
       await engine.scanner.scanMarkets();
-      res.json({ success: true, state: engine.scanner.getState() });
+      res.json({ success: true, state: engine.scanner.getState(), pipeline: engine.scanner.getPipelineState() });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }
@@ -610,20 +606,15 @@ async function startServer() {
     }
   });
 
-  app.get("/api/scanner/pipeline", async (req, res) => {
-    try {
-      const state = pipelineEngine.getState();
-      if (state.symbols.length === 0 || req.query.refresh === "true") await pipelineEngine.executePipelineScan();
-      res.json({ success: true, pipeline: pipelineEngine.getState() });
-    } catch (error: any) {
-      res.status(500).json({ success: false, error: error.message });
-    }
+  app.get("/api/scanner/pipeline", (req, res) => {
+    res.json({ success: true, pipeline: engine.scanner.getPipelineState() });
   });
 
+  // Backward-compatible alias: this invokes the SAME canonical scan cycle used by auto-trading.
   app.post("/api/scanner/pipeline/scan-now", async (req, res) => {
     try {
-      const state = await pipelineEngine.executePipelineScan();
-      res.json({ success: true, pipeline: state });
+      await engine.scanner.scanMarkets();
+      res.json({ success: true, state: engine.scanner.getState(), pipeline: engine.scanner.getPipelineState() });
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }

@@ -19,7 +19,7 @@ interface SixGatePipelineVisualizerProps {
   gates: PipelineGateSummary[];
   totalDiscovered: number | null;
   passedAllCount: number | null;
-  activeSignalsCount: number | null;
+  candidateCount: number | null;
   isScanning: boolean;
   onRefresh: () => void;
 }
@@ -28,7 +28,7 @@ export function SixGatePipelineVisualizer({
   gates,
   totalDiscovered,
   passedAllCount,
-  activeSignalsCount,
+  candidateCount,
   isScanning,
   onRefresh,
 }: SixGatePipelineVisualizerProps) {
@@ -112,7 +112,7 @@ export function SixGatePipelineVisualizer({
               </React.Fragment>
             ))}
             <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-sans">
-              {activeSignalsCount ?? "—"} Active Signals
+              {candidateCount ?? "—"} 6-Gate Candidates
             </span>
           </div>
         </div>

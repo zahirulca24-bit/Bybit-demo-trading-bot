@@ -139,6 +139,7 @@ export class TradingEngine {
 
   private positionState: Record<string, PositionRiskState> = {};
   private isProcessingTrade: Record<string, boolean> = {};
+  private scannerPreflightCache = new Map<string, { expiresAt: number; result: { valid: boolean; qty: string; price: number; reason?: string } }>();
   private syncTimer: NodeJS.Timeout | null = null;
   private lastRiskLogAt = 0;
   private readonly symbolCooldownMs = 10 * 60 * 1000;
@@ -426,9 +427,11 @@ export class TradingEngine {
     }
   }
 
-  private async validatePreOrder(symbol: string, side: "Buy" | "Sell", notionalSizeUsdt: number): Promise<{ valid: boolean; qty: string; price: number; reason?: string }> {
-    const risk = await this.canOpenSymbol(symbol);
-    if (!risk.allowed) return { valid: false, qty: "0", price: 0, reason: risk.reason };
+  private async validatePreOrder(symbol: string, side: "Buy" | "Sell", notionalSizeUsdt: number, skipRiskCheck = false): Promise<{ valid: boolean; qty: string; price: number; reason?: string }> {
+    if (!skipRiskCheck) {
+      const risk = await this.canOpenSymbol(symbol);
+      if (!risk.allowed) return { valid: false, qty: "0", price: 0, reason: risk.reason };
+    }
 
     try {
       const walletRes = await this.bybit.getWalletBalance({ accountType: "UNIFIED", coin: "USDT" });
@@ -462,6 +465,26 @@ export class TradingEngine {
     }
   }
 
+  private scannerPreflightKey(symbol: string, side: "Buy" | "Sell", notional: number) {
+    return `${symbol}:${side}:${notional.toFixed(2)}`;
+  }
+
+  public async checkScannerExecutionEligibility(symbol: string, side: "Buy" | "Sell", notionalSizeUsdt: number): Promise<{ riskEligible: boolean; preOrderValid: boolean; reason?: string }> {
+    const risk = await this.canOpenSymbol(symbol);
+    if (!risk.allowed) return { riskEligible: false, preOrderValid: false, reason: risk.reason || "Risk rule blocked entry" };
+    const pre = await this.validatePreOrder(symbol, side, notionalSizeUsdt, true);
+    if (!pre.valid) return { riskEligible: true, preOrderValid: false, reason: pre.reason || "Latest pre-order validation failed" };
+    this.scannerPreflightCache.set(this.scannerPreflightKey(symbol, side, notionalSizeUsdt), { expiresAt: Date.now() + 5_000, result: pre });
+    return { riskEligible: true, preOrderValid: true };
+  }
+
+  private consumeScannerPreflight(symbol: string, side: "Buy" | "Sell", notionalSizeUsdt: number) {
+    const key = this.scannerPreflightKey(symbol, side, notionalSizeUsdt);
+    const cached = this.scannerPreflightCache.get(key);
+    this.scannerPreflightCache.delete(key);
+    return cached && cached.expiresAt >= Date.now() ? cached.result : null;
+  }
+
   public async executeScannerEntry(
     symbol: string,
     side: "Buy" | "Sell",
@@ -478,7 +501,7 @@ export class TradingEngine {
     try {
       const baseNotional = this.settings.positionMarginUsdt * this.settings.leverage;
       let targetNotional = baseNotional;
-      let pre = await this.validatePreOrder(targetSymbol, side, targetNotional);
+      let pre = this.consumeScannerPreflight(targetSymbol, side, targetNotional) || await this.validatePreOrder(targetSymbol, side, targetNotional);
       if (!pre.valid) return { success: false, message: pre.reason || "Risk validation failed" };
       currentPrice = pre.price;
       let stopPlan = await this.buildAdaptiveStopPlan(targetSymbol, side, currentPrice, quality);

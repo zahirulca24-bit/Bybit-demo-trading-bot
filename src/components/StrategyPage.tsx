@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from "react";
+import React, { useMemo, useState } from "react";
 import { Plus, X, Activity, ShieldCheck, Zap, Layers, RefreshCw } from "lucide-react";
-import { Technicals, TradeHistory, KlineUpdatePayload, ScannerState, Position, PipelineState } from "../types";
+import { Technicals, TradeHistory, KlineUpdatePayload, ScannerState, Position } from "../types";
 import { SixGatePipelineVisualizer } from "./SixGatePipelineVisualizer";
 import { ScannedPairsTable } from "./ScannedPairsTable";
 import { HighDensityScannerGrid } from "./HighDensityScannerGrid";
 import { MarketScannerTable } from "./MarketScannerTable";
+import { buildPipelineStateFromMarkets } from "../utils/canonicalScanner";
 
 interface StrategyPageProps {
   watchlist: string[];
@@ -39,30 +40,9 @@ export function StrategyPage({
 }: StrategyPageProps) {
   const [selectedSymbol, setSelectedSymbol] = useState<string>("BTCUSDT");
   const [activeTab, setActiveTab] = useState<"pipeline" | "5m_grid" | "turnover">("pipeline");
-  const [pipelineData, setPipelineData] = useState<PipelineState | null>(null);
-  const [isPipelineScanning, setIsPipelineScanning] = useState<boolean>(true);
-
   const activeSymbol = selectedSymbol || watchlist[0] || "BTCUSDT";
-
-  const fetchPipeline = async (forceRefresh = false) => {
-    setIsPipelineScanning(true);
-    try {
-      const url = forceRefresh ? "/api/scanner/pipeline/scan-now" : "/api/scanner/pipeline";
-      const res = await (forceRefresh ? fetch(url, { method: "POST" }) : fetch(url));
-      const data = await res.json();
-      if (data.success && data.pipeline) setPipelineData(data.pipeline);
-    } catch (err) {
-      console.error("Failed to fetch pipeline data:", err);
-    } finally {
-      setIsPipelineScanning(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchPipeline(false);
-    const interval = setInterval(() => fetchPipeline(false), 15000);
-    return () => clearInterval(interval);
-  }, []);
+  const pipelineData = useMemo(() => buildPipelineStateFromMarkets(scannerState.markets || [], scannerState.isScanning, scannerState.lastScanTime), [scannerState.markets, scannerState.isScanning, scannerState.lastScanTime]);
+  const isPipelineScanning = scannerState.isScanning;
 
   const executionControls = [
     "EMA50/200 = hard trend filter",
@@ -106,7 +86,7 @@ export function StrategyPage({
               </button>
             </div>
             {activeTab === "pipeline" && (
-              <button onClick={() => fetchPipeline(true)} disabled={isPipelineScanning} className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-800 hover:border-neutral-700 text-neutral-300 hover:text-white text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer" title="Force refresh 6-Gate scan">
+              <button onClick={onScanNow} disabled={isPipelineScanning} className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-800 hover:border-neutral-700 text-neutral-300 hover:text-white text-xs font-semibold transition-all disabled:opacity-50 cursor-pointer" title="Force refresh 6-Gate scan">
                 <RefreshCw className={`w-3.5 h-3.5 ${isPipelineScanning ? "animate-spin text-blue-400" : ""}`} />
                 <span>{isPipelineScanning ? "Scanning..." : "Scan"}</span>
               </button>
@@ -118,14 +98,14 @@ export function StrategyPage({
       {activeTab === "pipeline" && (
         <div className="space-y-6">
           <SixGatePipelineVisualizer
-            gates={pipelineData?.gates ?? []}
-            totalDiscovered={pipelineData?.totalDiscovered ?? null}
-            passedAllCount={pipelineData?.passedAllCount ?? null}
-            activeSignalsCount={pipelineData?.activeSignalsCount ?? null}
+            gates={pipelineData.gates}
+            totalDiscovered={pipelineData.totalDiscovered}
+            passedAllCount={pipelineData.passedAllCount}
+            candidateCount={pipelineData.candidateCount}
             isScanning={isPipelineScanning}
-            onRefresh={() => fetchPipeline(true)}
+            onRefresh={onScanNow}
           />
-          <ScannedPairsTable symbols={pipelineData?.symbols || []} selectedSymbol={activeSymbol} onSelectSymbol={setSelectedSymbol} onQuickBuy={onQuickBuy} isScanning={isPipelineScanning} />
+          <ScannedPairsTable symbols={pipelineData.symbols} selectedSymbol={activeSymbol} onSelectSymbol={setSelectedSymbol} onQuickBuy={onQuickBuy} isScanning={isPipelineScanning} />
         </div>
       )}
 

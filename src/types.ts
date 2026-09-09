@@ -88,18 +88,82 @@ export interface ClientToServerEvents {
 
 export interface KlineUpdatePayload { symbol: string; candle: Candle; ema9?: { time: number; value: number }; ema21?: { time: number; value: number }; }
 
-export interface ScannedMarketItem {
-  symbol: string; price?: number; lastPrice: number; turnover24h: number; volume24h: number; price24hPcnt: number; highPrice24h: number; lowPrice24h: number;
-  rsi: number; ema50: number; ema200: number; ema9?: number; ema21?: number;
-  ema9Above21?: boolean; ema9Slope?: number; ema21Slope?: number; freshCross?: "bullish" | "bearish" | "none"; crossoverAgeCandles?: number | null; emaTimingScore?: number; finalSetupScore?: number; emaTimingState?: "Bullish" | "Bearish" | "Neutral" | "Unavailable"; emaTimingChoppy?: boolean;
-  trend15m: "Bullish HTF" | "Bearish HTF" | "Neutral HTF";
-  spreadPcnt: number; atr?: number; atrPcnt: number; oiPositive: boolean; oiChangePercent?: number; breakoutBonus?: boolean; entryCandleDirection?: "Bullish" | "Bearish" | "Doji"; gatePassed: number;
-  trend: "Bullish" | "Bearish" | "Neutral";
-  signal: "BUY_SIGNAL" | "WAITING" | "IN_POSITION" | "SELL_SIGNAL";
-  signalReason: string; lastScannedAt: number;
+export interface ExecutionEligibility {
+  gateCandidate: boolean;
+  riskEligible: boolean;
+  executableNow: boolean;
+  blockReason: string | null;
 }
 
-export interface ScannerState { markets: ScannedMarketItem[]; autoTrade: boolean; maxConcurrent: number; isScanning: boolean; lastScanTime: number; topSymbols: string[]; }
+export interface GateValidationResult { passed: boolean; valueDisplay: string; detail: string; }
+export interface GateResultSummary {
+  gate1_volume: GateValidationResult;
+  gate2_trend: GateValidationResult;
+  gate3_spread: GateValidationResult;
+  gate4_atr: GateValidationResult;
+  gate5_oi: GateValidationResult;
+  gate6_rsi: GateValidationResult;
+  gate6_candle: GateValidationResult;
+  gate6FailureReason: "RSI_OUT_OF_RANGE" | "DIRECTIONAL_CANDLE_FAILED" | "RSI_AND_CANDLE_FAILED" | "NO_DIRECTIONAL_TREND" | null;
+  passedAll: boolean;
+  failedGateNumber: number | null;
+  failedGateName: string | null;
+}
+
+export type RsiZone5m = "Long (50-64)" | "Short (36-50)" | "Overbought (>64)" | "Oversold (<36)" | "Neutral";
+
+export interface ScannedMarketItem {
+  symbol: string;
+  price: number;
+  lastPrice: number;
+  turnover24h: number;
+  volume24h: number;
+  price24hPcnt: number;
+  highPrice24h: number;
+  lowPrice24h: number;
+  bidPrice: number;
+  askPrice: number;
+  rsi: number;
+  rsiZone5m: RsiZone5m;
+  ema50: number;
+  ema200: number;
+  ema9?: number;
+  ema21?: number;
+  ema9Above21?: boolean;
+  ema9Slope?: number;
+  ema21Slope?: number;
+  freshCross?: "bullish" | "bearish" | "none";
+  crossoverAgeCandles?: number | null;
+  emaTimingScore?: number;
+  finalSetupScore?: number;
+  emaTimingState?: "Bullish" | "Bearish" | "Neutral" | "Unavailable";
+  emaTimingChoppy?: boolean;
+  trend15m: "Bullish HTF" | "Bearish HTF" | "Neutral HTF";
+  trend: "Bullish" | "Bearish" | "Neutral";
+  spreadPcnt: number;
+  atr?: number;
+  atrPcnt: number;
+  oiAvailable: boolean;
+  oiPositive: boolean;
+  oiChangePercent?: number;
+  breakoutBonus?: boolean;
+  entryCandleDirection?: "Bullish" | "Bearish" | "Doji";
+  gatePassed: number;
+  gates: GateResultSummary;
+  executionEligibility: ExecutionEligibility;
+  signal: "BUY_SIGNAL" | "WAITING" | "IN_POSITION" | "SELL_SIGNAL";
+  signalReason: string;
+  lastScannedAt: number;
+}
+
+export interface ScannerState {
+  markets: ScannedMarketItem[];
+  autoTrade: boolean;
+  maxConcurrent: number;
+  isScanning: boolean;
+  lastScanTime: number;
+  topSymbols: string[];
+}
 
 export interface Scanner5mSignal {
   symbol: string; timeframe: string; candleTime: number; price: number; side: "LONG" | "SHORT"; grade: "GRADE_A" | "GRADE_B"; reason: string;
@@ -107,31 +171,10 @@ export interface Scanner5mSignal {
   timestamp: number;
 }
 
-export interface GateValidationResult { passed: boolean; valueDisplay: string; detail: string; }
-export interface GateResultSummary {
-  gate1_volume: GateValidationResult;
-  gate2_trend: GateValidationResult; // EMA50/EMA200 direction + confirmed price on correct side of EMA50
-  gate3_spread: GateValidationResult; // Bid-Ask Spread <= 0.08%
-  gate4_atr: GateValidationResult; // ATR 0.30%–1.20%
-  gate5_oi: GateValidationResult; // Real Bybit 1h OI expansion >= +0.50%; unavailable fails closed
-  gate6_rsi: GateValidationResult; // RSI Long 50–64 / Short 36–50 on confirmed candle
-  passedAll: boolean; failedGateNumber: number | null; failedGateName: string | null;
-}
-
-export type RsiZone5m = "Long (50-64)" | "Short (36-50)" | "Overbought (>64)" | "Oversold (<36)" | "Neutral";
-
-export interface PipelineScannedSymbol {
-  symbol: string; price: number; turnover24h: number; turnoverFormatted: string;
-  ema50_15m: number; ema200_15m: number; trend15m: "Bullish HTF" | "Bearish HTF" | "Neutral"; isTrend15mValid: boolean;
-  bidPrice: number; askPrice: number; spreadPercent: number; isSpreadValid: boolean;
-  atr5m: number; atr5mPercent: number; isAtrValid: boolean;
-  openInterest: number; oiChangePercent1h: number; oiAvailable?: boolean; isOiValid: boolean;
-  rsi14_5m: number; rsiZone5m: RsiZone5m; isRsi5mValid: boolean;
-  gates: GateResultSummary; pipelineStatus: "Passed All 6 Gates" | string; signalAction: "Grade A Long" | "Grade A Short" | "Standby"; actionType: "LONG" | "SHORT" | "STANDBY"; lastUpdated: number;
-}
+export type PipelineScannedSymbol = ScannedMarketItem;
 
 export interface PipelineGateSummary { gateNumber: number; name: string; ruleDescription: string; status: "Passed" | "Filtering" | "Active"; inputCount: number; passCount: number; passRatePercent: number; }
-export interface PipelineState { totalDiscovered: number; passedAllCount: number; activeSignalsCount: number; gates: PipelineGateSummary[]; symbols: PipelineScannedSymbol[]; lastScanTimestamp: number; isScanning: boolean; }
+export interface PipelineState { totalDiscovered: number; passedAllCount: number; candidateCount: number; gates: PipelineGateSummary[]; symbols: ScannedMarketItem[]; lastScanTimestamp: number; isScanning: boolean; }
 
 export interface Scanner5mResult {
   symbol: string; price: number; ema50: number; ema200: number; rsi: number; prevRsi: number; currentVolume: number; avgVolume20: number; volumeRatio: number;
