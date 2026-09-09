@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -254,7 +254,7 @@ export function ActiveTradesPage({
   );
 }
 
-function StatCard({ label, value, detail, icon }: { label: string; value: string | number | undefined; detail: string; icon: React.ReactNode }) {
+function StatCard({ label, value, detail, icon }: { label: string; value: string | number | undefined; detail: string; icon: ReactNode }) {
   return <div className="bg-neutral-900 border border-neutral-800 p-5 rounded-xl"><div className="flex items-center justify-between mb-2"><span className="text-xs text-neutral-400 font-medium">{label}</span>{icon}</div><p className="text-2xl font-bold text-white font-mono">{value ?? "—"}</p><p className="text-[11px] text-neutral-500 mt-2">{detail}</p></div>;
 }
 
