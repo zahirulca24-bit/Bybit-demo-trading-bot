@@ -13,12 +13,14 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
+    "test": "npm run test:quality && npm run test:ema-timing && npm run test:scanner-ui && npm run test:reports && npm run test:risk-accounting && npm run test:history-integrity && npm run test:risk-hardening",
     "test:quality": "tsx src/utils/tradeQuality.test.ts",
     "test:ema-timing": "tsx src/utils/emaTimingQuality.test.ts",
     "test:scanner-ui": "tsx src/utils/scannerTimingDisplay.test.ts",
     "test:reports": "tsx src/utils/tradingReports.test.ts",
     "test:risk-accounting": "tsx src/utils/dailyRiskAccounting.test.ts",
-    "test:history-integrity": "tsx src/utils/exchangeTradeHistory.test.ts"
+    "test:history-integrity": "tsx src/utils/exchangeTradeHistory.test.ts",
+    "test:risk-hardening": "tsx src/utils/riskHardening.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
