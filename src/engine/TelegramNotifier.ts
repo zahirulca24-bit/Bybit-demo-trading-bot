@@ -1,4 +1,5 @@
 import TelegramBot from 'node-telegram-bot-api';
+import { sendWithRetry } from '../utils/tradingReports';
 
 function escapeHtml(text: string | number | undefined | null): string {
   if (text === undefined || text === null) return '';
@@ -27,17 +28,27 @@ export class TelegramNotifier {
   }
 
   async send(message: string): Promise<{ success: boolean; error?: string }> {
-    if (this.bot && this.chatId) {
-      try {
-        await this.bot.sendMessage(this.chatId, message, { parse_mode: 'HTML' });
-        return { success: true };
-      } catch (err: any) {
-        console.error("Failed to send Telegram message:", err.message);
-        return { success: false, error: err.message };
-      }
-    } else {
+    if (!this.bot || !this.chatId) {
       return { success: false, error: "Telegram bot token or Chat ID not configured in environment" };
     }
+
+    const result = await sendWithRetry(
+      async () => {
+        await this.bot!.sendMessage(this.chatId!, message, { parse_mode: 'HTML' });
+      },
+      { maxAttempts: 3, delaysMs: [750, 2000] },
+    );
+    if (result.success) return { success: true };
+
+    const err: any = result.error;
+    const nestedCodes = Array.isArray(err?.errors)
+      ? err.errors.map((item: any) => item?.code).filter(Boolean).slice(0, 5).join(",")
+      : "";
+    const code = String(err?.code || err?.response?.body?.error_code || "UNKNOWN");
+    const reason = String(err?.message || err?.response?.body?.description || "Telegram delivery failed");
+    const safeReason = `${code}: ${reason}${nestedCodes ? ` nested=${nestedCodes}` : ""}`;
+    console.error(`TELEGRAM_SEND_FAILED attempts=${result.attempts} reason=${safeReason}`);
+    return { success: false, error: safeReason };
   }
 
   async sendTestNotification(): Promise<{ success: boolean; error?: string }> {

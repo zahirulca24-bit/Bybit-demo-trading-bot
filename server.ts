@@ -13,6 +13,7 @@ import { SixGateFilteringPipeline } from "./src/engine/SixGateFilteringPipeline"
 import { initDatabase, dbGetClosedTrades } from "./src/db";
 import { getUtcTradingDayWindow, normalizeTimestampMs } from "./src/utils/utcTradingDay";
 import { classifyClosedTradeExit } from "./src/utils/exitClassification";
+import { TelegramReportService } from "./src/engine/TelegramReportService";
 
 dotenv.config();
 
@@ -53,6 +54,9 @@ async function startServer() {
 
   const scanner5m = new LegacyInformationalScanner5m(bybit);
   engine.emitter.log("[Legacy / Informational Scanner] Isolated from auto-entry and Telegram. Manual API inspection only.");
+
+  const telegramReports = new TelegramReportService(bybit, engine, engine.telegram);
+  telegramReports.start();
 
   app.get("/api/balance", async (req, res) => {
     try {

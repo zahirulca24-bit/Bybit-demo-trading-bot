@@ -285,3 +285,85 @@ export async function dbSaveSettings(key: string, value: any) {
     await memoryStore.saveSettings(key, value);
   }
 }
+
+
+export async function dbGetReportTrades(startMs: number, endMs: number): Promise<{ ok: boolean; rows: any[]; error?: string }> {
+  if (!isConnected || !pool) {
+    return { ok: false, rows: [], error: "Persistent database unavailable for report window" };
+  }
+  try {
+    const start = new Date(startMs);
+    const end = new Date(endMs);
+    const res = await pool.query(
+      `SELECT id, symbol, side, entry_price, exit_price, size_notional, margin_used, leverage, status, exit_reason, realized_pnl, opened_at, closed_at, entry_diagnostics, exit_audit
+       FROM trades
+       WHERE (opened_at >= $1 AND opened_at < $2)
+          OR (closed_at >= $1 AND closed_at < $2)
+          OR (opened_at < $2 AND (closed_at IS NULL OR closed_at >= $2))
+       ORDER BY COALESCE(closed_at, opened_at) ASC`,
+      [start, end]
+    );
+    return {
+      ok: true,
+      rows: res.rows.map((row: any) => ({
+        id: String(row.id),
+        symbol: row.symbol,
+        side: row.side,
+        entryPrice: Number(row.entry_price),
+        exitPrice: row.exit_price == null ? null : Number(row.exit_price),
+        sizeNotional: row.size_notional == null ? null : Number(row.size_notional),
+        marginUsed: row.margin_used == null ? null : Number(row.margin_used),
+        leverage: row.leverage == null ? null : Number(row.leverage),
+        status: row.status,
+        exitReason: row.exit_reason || "Other / Unknown",
+        realizedPnl: row.realized_pnl == null ? null : Number(row.realized_pnl),
+        openedAt: row.opened_at ? new Date(row.opened_at).getTime() : null,
+        closedAt: row.closed_at ? new Date(row.closed_at).getTime() : null,
+        entryDiagnostics: row.entry_diagnostics || null,
+        exitAudit: row.exit_audit || null,
+      }))
+    };
+  } catch (err: any) {
+    console.error("❌ [Database] Report-window query failed:", err.message);
+    return { ok: false, rows: [], error: err.message || "Report-window database query failed" };
+  }
+}
+
+
+export async function dbClaimReportDelivery(key: string, leaseMs: number = 120_000, retryDelayMs: number = 300_000): Promise<{ claimed: boolean; persistent: boolean; error?: string }> {
+  const now = Date.now();
+  if (!isConnected || !pool) {
+    const current = await memoryStore.getSettings(key);
+    if (current?.status === "sent") return { claimed: false, persistent: false };
+    if (current?.status === "sending" && now - Number(current.claimedAt || 0) < leaseMs) return { claimed: false, persistent: false };
+    if (current?.status === "failed" && now - Number(current.failedAt || 0) < retryDelayMs) return { claimed: false, persistent: false };
+    await memoryStore.saveSettings(key, { status: "sending", claimedAt: now });
+    return { claimed: true, persistent: false };
+  }
+  try {
+    const cutoff = now - leaseMs;
+    const retryCutoff = now - retryDelayMs;
+    const value = JSON.stringify({ status: "sending", claimedAt: now });
+    const res = await pool.query(
+      `INSERT INTO bot_settings (key, value, updated_at) VALUES ($1, $2::jsonb, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+       WHERE bot_settings.value->>'status' <> 'sent'
+         AND (bot_settings.value->>'status' <> 'sending' OR COALESCE((bot_settings.value->>'claimedAt')::bigint, 0) < $3)
+         AND (bot_settings.value->>'status' <> 'failed' OR COALESCE((bot_settings.value->>'failedAt')::bigint, 0) < $4)
+       RETURNING key`,
+      [key, value, cutoff, retryCutoff]
+    );
+    return { claimed: res.rows.length > 0, persistent: true };
+  } catch (err: any) {
+    console.error("❌ [Database] Report delivery claim failed:", err.message);
+    return { claimed: false, persistent: true, error: err.message };
+  }
+}
+
+export async function dbCompleteReportDelivery(key: string, sent: boolean, metadata: Record<string, any> = {}): Promise<void> {
+  const now = Date.now();
+  const value = sent
+    ? { status: "sent", sentAt: now, ...metadata }
+    : { status: "failed", failedAt: now, ...metadata };
+  await dbSaveSettings(key, value);
+}
