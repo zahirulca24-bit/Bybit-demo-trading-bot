@@ -18,7 +18,8 @@
     "test:scanner-ui": "tsx src/utils/scannerTimingDisplay.test.ts",
     "test:reports": "tsx src/utils/tradingReports.test.ts",
     "test:risk-accounting": "tsx src/utils/dailyRiskAccounting.test.ts",
-    "test:history-integrity": "tsx src/utils/exchangeTradeHistory.test.ts"
+    "test:history-integrity": "tsx src/utils/exchangeTradeHistory.test.ts",
+    "test:frontend-contract": "tsx src/utils/frontendContract.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

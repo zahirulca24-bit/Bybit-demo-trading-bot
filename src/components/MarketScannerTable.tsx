@@ -67,7 +67,7 @@ export function MarketScannerTable({
   const [searchQuery, setSearchQuery] = useState("");
 
   const { markets = [], autoTrade, isScanning, lastScanTime } = scannerState;
-  const tradeSignals = useMemo(() => markets.filter((m) => m.signal === "BUY_SIGNAL" || m.signal === "SELL_SIGNAL"), [markets]);
+  const gateCandidates = useMemo(() => markets.filter((m) => m.gatePassed === 6), [markets]);
   const bullishCount = useMemo(() => markets.filter((m) => m.trend === "Bullish").length, [markets]);
   const bearishCount = useMemo(() => markets.filter((m) => m.trend === "Bearish").length, [markets]);
   const inPositionCount = useMemo(() => markets.filter((m) => m.signal === "IN_POSITION").length, [markets]);
@@ -75,7 +75,7 @@ export function MarketScannerTable({
   const filteredMarkets = useMemo(() => markets.filter((item) => {
     const query = searchQuery.trim().toUpperCase();
     if (query && !item.symbol.includes(query)) return false;
-    if (filterTab === "signals") return item.signal === "BUY_SIGNAL" || item.signal === "SELL_SIGNAL";
+    if (filterTab === "signals") return item.gatePassed === 6;
     if (filterTab === "bullish") return item.trend === "Bullish";
     if (filterTab === "bearish") return item.trend === "Bearish";
     if (filterTab === "in_position") return item.signal === "IN_POSITION" || activePositions.some((p) => p.symbol === item.symbol);
@@ -131,7 +131,7 @@ export function MarketScannerTable({
 
       <div className="grid grid-cols-2 sm:grid-cols-4 border-b border-neutral-800 bg-neutral-950/40 divide-x divide-neutral-800/80">
         <div className="p-3 sm:px-5"><div className="text-[11px] text-neutral-400">Scanned Universe</div><div className="font-bold text-white mt-1">{markets.length} pairs</div></div>
-        <div className="p-3 sm:px-5"><div className="text-[11px] text-neutral-400">Trade Signals</div><div className="font-bold text-emerald-400 mt-1">{tradeSignals.length}</div></div>
+        <div className="p-3 sm:px-5"><div className="text-[11px] text-neutral-400">6-Gate Candidates</div><div className="font-bold text-emerald-400 mt-1">{gateCandidates.length}</div></div>
         <div className="p-3 sm:px-5"><div className="text-[11px] text-neutral-400">Trend Distribution</div><div className="text-xs mt-1"><span className="text-emerald-400">{bullishCount} Bullish</span> <span className="text-neutral-600">/</span> <span className="text-rose-400">{bearishCount} Bearish</span></div></div>
         <div className="p-3 sm:px-5"><div className="text-[11px] text-neutral-400">Active Positions</div><div className="font-bold text-blue-400 mt-1">{activePositions.length} / {STRICT_MAX_CONCURRENT_POSITIONS}</div></div>
       </div>
@@ -140,7 +140,7 @@ export function MarketScannerTable({
         <div className="flex items-center gap-1.5 overflow-x-auto">
           {([
             ["all", `All (${markets.length})`],
-            ["signals", `Signals (${tradeSignals.length})`],
+            ["signals", `Candidates (${gateCandidates.length})`],
             ["bullish", `Bullish (${bullishCount})`],
             ["bearish", `Bearish (${bearishCount})`],
             ["in_position", `In Position (${inPositionCount})`],
@@ -221,7 +221,12 @@ export function MarketScannerTable({
                       <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] bg-neutral-800 text-neutral-400"><Clock className="w-3 h-3" /> WAITING</span>
                     )}
                   </td>
-                  <td className="py-3 px-4 max-w-xs"><div className="text-[11px] text-neutral-300 line-clamp-2" title={item.signalReason}>{item.signalReason || "Monitoring strict confirmed-candle conditions…"}</div></td>
+                  <td className="py-3 px-4 max-w-xs">
+                    <div className="text-[10px] text-neutral-400">6-Gate Candidate: <span className={item.gatePassed === 6 ? "text-emerald-300" : "text-neutral-500"}>{item.gatePassed === 6 ? "Yes" : "No"}</span></div>
+                    <div className="text-[10px] text-neutral-400">Executable Now: <span className="text-amber-300">Not exposed by current backend pre-order contract</span></div>
+                    {item.gatePassed === 5 && <div className="text-[10px] text-rose-300">Gate 6: {item.gate6FailureReason || "Backend detail unavailable"}</div>}
+                    <div className="text-[11px] text-neutral-300 line-clamp-2 mt-1" title={item.signalReason}>{item.signalReason || "Monitoring strict confirmed-candle conditions…"}</div>
+                  </td>
                   <td className="py-3 px-4 text-right">
                     <div className="flex justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
                       <button onClick={() => onSelectSymbol(item.symbol)} className="px-2.5 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs">Chart</button>

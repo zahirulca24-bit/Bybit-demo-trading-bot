@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Wallet, Play, Square, TrendingUp, XCircle, Terminal, Zap, Loader2, ArrowUpRight } from "lucide-react";
 import { Position, TradeHistory, KlineUpdatePayload } from "../types";
+import { QUICK_TEST_REQUESTED_QTY } from "../utils/frontendContract";
 import { CandlestickChart } from "./CandlestickChart";
 
 interface TerminalPageProps {
@@ -9,6 +10,7 @@ interface TerminalPageProps {
   isCircuitBreaker?: boolean;
   isLoading: boolean;
   toggleBot: () => void;
+  onResetCircuitBreaker: () => Promise<void> | void;
   watchlist: string[];
   prices: Record<string, number>;
   positions: Position[];
@@ -24,7 +26,8 @@ export function TerminalPage({
   isBotRunning, 
   isCircuitBreaker, 
   isLoading, 
-  toggleBot, 
+  toggleBot,
+  onResetCircuitBreaker, 
   watchlist, 
   prices, 
   positions,
@@ -84,7 +87,7 @@ export function TerminalPage({
             onClick={handleQuickTestLong}
             disabled={isLoading || isPlacingTestOrder}
             className="flex items-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-all bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/30 hover:border-emerald-500/50 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
-            title="Immediately place a 0.001 BTC Market Buy order on Bybit Demo with TP/SL brackets, bypassing indicators"
+            title={`Requests ${QUICK_TEST_REQUESTED_QTY} contracts. Normal pre-order risk validation runs before submission; scanner indicator gates are bypassed.`}
           >
             {isPlacingTestOrder ? (
               <>
@@ -96,7 +99,7 @@ export function TerminalPage({
                 <Zap className="w-4 h-4 fill-emerald-400 text-emerald-400" />
                 <span>Quick Test Long (Market)</span>
                 <span className="text-[11px] bg-emerald-500/20 px-1.5 py-0.5 rounded font-mono font-normal">
-                  0.001 {activeSymbol.replace('USDT', '')}
+                  {QUICK_TEST_REQUESTED_QTY} {activeSymbol.replace('USDT', '')} requested
                 </span>
               </>
             )}
@@ -105,10 +108,7 @@ export function TerminalPage({
           {/* Engine Start/Stop Button */}
           {isCircuitBreaker ? (
             <button
-              onClick={async () => {
-                await fetch('/api/bot/reset-circuit-breaker', { method: 'POST' });
-                toggleBot();
-              }}
+              onClick={onResetCircuitBreaker}
               disabled={isLoading}
               className="flex items-center gap-2 px-5 py-2.5 rounded-lg font-bold text-sm transition-all bg-red-600 text-white hover:bg-red-700 animate-pulse border border-red-500 shadow-[0_0_15px_rgba(220,38,38,0.5)]"
             >
@@ -128,12 +128,12 @@ export function TerminalPage({
               {isBotRunning ? (
                 <>
                   <Square className="w-4 h-4" />
-                  <span>Stop Engine</span>
+                  <span>Pause Entries & Position Management</span>
                 </>
               ) : (
                 <>
                   <Play className="w-4 h-4" />
-                  <span>Start Engine</span>
+                  <span>Resume Engine</span>
                 </>
               )}
             </button>

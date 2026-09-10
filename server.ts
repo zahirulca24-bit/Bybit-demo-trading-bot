@@ -41,6 +41,7 @@ async function startServer() {
 
   app.use(cors());
   app.use(express.json());
+  const sendApiError = (res: express.Response, status: number, message: string) => res.status(status).json({ success: false, error: { message } });
 
   const bybit = new RestClientV5({
     key: process.env.BYBIT_API_KEY,
@@ -104,15 +105,15 @@ async function startServer() {
   });
 
   app.get("/api/settings", (req, res) => {
-    res.json({ success: true, settings: engine.settings });
+    res.json({ success: true, settings: engine.settings, riskProfile: engine.getRuntimeRiskProfile() });
   });
 
   app.post("/api/settings", requireAuth, (req, res) => {
     const { settings } = req.body;
     if (settings) {
       engine.updateSettings(settings);
-      res.json({ success: true, settings: engine.settings });
-    } else res.status(400).json({ success: false, message: "Missing settings" });
+      res.json({ success: true, settings: engine.settings, riskProfile: engine.getRuntimeRiskProfile() });
+    } else sendApiError(res, 400, "Missing settings");
   });
 
   app.get("/api/history", async (req, res) => {
@@ -166,6 +167,47 @@ async function startServer() {
     }
   });
 
+  let runtimeStatusCache: { at: number; data: any } = { at: 0, data: null };
+  app.get("/api/runtime-status", async (req, res) => {
+    const now = Date.now();
+    if (runtimeStatusCache.data && now - runtimeStatusCache.at < 15_000) return res.json(runtimeStatusCache.data);
+    let bybitNetworkReachable = false;
+    let accountAuthenticated = false;
+    let privateApiHealthy = false;
+    let error: string | null = null;
+    try {
+      const publicResult = await bybit.getServerTime();
+      bybitNetworkReachable = publicResult.retCode === 0;
+    } catch (err: any) { error = err?.message || "Bybit network check failed"; }
+    if (bybitNetworkReachable) {
+      try {
+        const privateResult = await bybit.getWalletBalance({ accountType: "UNIFIED", coin: "USDT" });
+        accountAuthenticated = privateResult.retCode === 0 && Array.isArray(privateResult.result?.list);
+        privateApiHealthy = accountAuthenticated;
+        if (!privateApiHealthy) error = privateResult.retMsg || "Bybit private API authentication failed";
+      } catch (err: any) { error = err?.message || "Bybit private API check failed"; }
+    }
+    const ws = engine.wsManager.getRuntimeStatus();
+    const scanner = engine.scanner.getState();
+    const data = {
+      success: true,
+      status: {
+        bybitNetworkReachable,
+        accountAuthenticated,
+        privateApiHealthy,
+        privateWsConnected: ws.connected && ws.privateAuthenticated,
+        privateWsAuthenticated: ws.privateAuthenticated,
+        tradingEngineRunning: engine.getIsRunning(),
+        scannerState: scanner.isScanning ? "scanning" : scanner.lastScanTime ? "scheduled" : "idle",
+        scannerLastScanTime: scanner.lastScanTime,
+        checkedAt: now,
+        error,
+      },
+    };
+    runtimeStatusCache = { at: now, data };
+    res.json(data);
+  });
+
   app.get("/api/test-bybit", async (req, res) => {
     const startTime = Date.now();
     try {
@@ -197,7 +239,7 @@ async function startServer() {
     if (symbol) {
       engine.addSymbol(symbol.toUpperCase());
       res.json({ success: true, watchlist: engine.watchlist });
-    } else res.status(400).json({ success: false, message: "Missing symbol" });
+    } else sendApiError(res, 400, "Missing symbol");
   });
 
   app.post("/api/watchlist/remove", (req, res) => {
@@ -205,7 +247,7 @@ async function startServer() {
     if (symbol) {
       engine.removeSymbol(symbol.toUpperCase());
       res.json({ success: true, watchlist: engine.watchlist });
-    } else res.status(400).json({ success: false, message: "Missing symbol" });
+    } else sendApiError(res, 400, "Missing symbol");
   });
 
   app.get("/api/positions", async (req, res) => {
@@ -257,7 +299,7 @@ async function startServer() {
   app.post("/api/positions/close", requireAuth, async (req, res) => {
     try {
       const { symbol, side, qty } = req.body;
-      if (!symbol) return res.status(400).json({ success: false, message: "Missing symbol in request body" });
+      if (!symbol) return sendApiError(res, 400, "Missing symbol in request body");
       const targetSymbol = symbol.toUpperCase();
       if (side && qty) {
         const closeSide = side === "Buy" ? "Sell" : "Buy";
@@ -272,7 +314,7 @@ async function startServer() {
       }
       const result = await engine.manualClosePosition(targetSymbol);
       if (result.success) res.json(result);
-      else res.status(400).json(result);
+      else sendApiError(res, 400, result.message || `Failed to close position for ${symbol}`);
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }
@@ -281,9 +323,10 @@ async function startServer() {
   app.post("/api/positions/close-all", requireAuth, async (req, res) => {
     try {
       const result = await engine.closeAllPositions();
-      res.json(result);
+      if (result.success) res.json(result);
+      else sendApiError(res, 500, "Failed to close all positions");
     } catch (error: any) {
-      res.status(500).json({ success: false, error: error.message });
+      sendApiError(res, 500, error.message || "Failed to close all positions");
     }
   });
 
@@ -292,7 +335,8 @@ async function startServer() {
       const symbol = req.body?.symbol || "BTCUSDT";
       const qty = req.body?.qty || "0.001";
       const result = await engine.executeManualTestOrder(symbol, qty);
-      res.json(result);
+      if (result.success) res.json(result);
+      else sendApiError(res, 400, result.message || "Quick Test order rejected");
     } catch (error: any) {
       res.status(500).json({ success: false, error: error.message });
     }
@@ -426,12 +470,12 @@ async function startServer() {
 
   app.post("/api/bot/start", requireAuth, (req, res) => {
     if (engine.start()) res.json({ success: true, message: "Bot started" });
-    else res.status(400).json({ success: false, message: "Bot is already running" });
+    else sendApiError(res, 400, "Bot is already running");
   });
 
   app.post("/api/bot/stop", requireAuth, (req, res) => {
-    if (engine.stop()) res.json({ success: true, message: "Bot stopped" });
-    else res.status(400).json({ success: false, message: "Bot is not running" });
+    if (engine.stop()) res.json({ success: true, message: "Engine paused: new entries and active position-management logic are paused" });
+    else sendApiError(res, 400, "Bot is not running");
   });
 
   app.get('/api/bot/status', (req, res) => {

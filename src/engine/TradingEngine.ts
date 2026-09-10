@@ -696,6 +696,22 @@ export class TradingEngine {
   public getHistory() { return this.tradeHistory; }
   public getTechnicals() { return this.currentTechnicals; }
   public getIsRunning() { return this.isRunning; }
+  public getRuntimeRiskProfile() {
+    return {
+      leverage: this.settings.leverage,
+      positionMarginUsdt: this.settings.positionMarginUsdt,
+      baseNotionalUsdt: this.settings.positionMarginUsdt * this.settings.leverage,
+      maxPositions: this.settings.maxPositions,
+      duplicateSymbolBlocked: true,
+      sameSymbolCooldownMs: this.symbolCooldownMs,
+      dailyEntryBreakerNetUsdt: this.settings.globalMaxLossUsdt,
+      consecutiveLossPauseMs: this.consecutiveLossPauseMs,
+      breakerScope: "new_entries_only" as const,
+      adaptiveSlMinPercent: 1.0,
+      adaptiveSlMaxPercent: 1.8,
+      stopLossNeverWidens: true,
+    };
+  }
   public testTelegram() { this.telegram.send("🔔 <b>Test Notification</b>\nStrict Bybit demo trading pipeline is active."); }
 
   public resetCircuitBreaker() {

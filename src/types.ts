@@ -5,6 +5,34 @@ export interface CandleData { time: number | string; open: number; high: number;
 export interface EmaData { time: number | string; value: number; }
 export interface Technicals { ema9: number; ema21: number; rsi: number; timestamp?: number; }
 
+export interface RuntimeRiskProfile {
+  leverage: number;
+  positionMarginUsdt: number;
+  baseNotionalUsdt: number;
+  maxPositions: number;
+  duplicateSymbolBlocked: boolean;
+  sameSymbolCooldownMs: number;
+  dailyEntryBreakerNetUsdt: number;
+  consecutiveLossPauseMs: number;
+  breakerScope: "new_entries_only";
+  adaptiveSlMinPercent: number;
+  adaptiveSlMaxPercent: number;
+  stopLossNeverWidens: boolean;
+}
+
+export interface RuntimeStatus {
+  bybitNetworkReachable: boolean;
+  accountAuthenticated: boolean;
+  privateApiHealthy: boolean;
+  privateWsConnected: boolean;
+  privateWsAuthenticated: boolean;
+  tradingEngineRunning: boolean;
+  scannerState: "scanning" | "scheduled" | "idle";
+  scannerLastScanTime: number;
+  checkedAt: number;
+  error: string | null;
+}
+
 export interface Settings {
   leverage: number;
   positionMarginUsdt: number;
@@ -104,7 +132,7 @@ export interface ScannedMarketItem {
   spreadPcnt: number; atr?: number; atrPcnt: number; oiPositive: boolean; oiChangePercent?: number; breakoutBonus?: boolean; entryCandleDirection?: "Bullish" | "Bearish" | "Doji"; gatePassed: number;
   trend: "Bullish" | "Bearish" | "Neutral";
   signal: "BUY_SIGNAL" | "WAITING" | "IN_POSITION" | "SELL_SIGNAL";
-  signalReason: string; lastScannedAt: number;
+  signalReason: string; gate6FailureReason?: "RSI_OUT_OF_RANGE" | "DIRECTIONAL_CANDLE_FAILED" | "RSI_AND_CANDLE_FAILED" | "NO_DIRECTIONAL_TREND" | null; lastScannedAt: number;
 }
 
 export interface ScannerState { markets: ScannedMarketItem[]; autoTrade: boolean; maxConcurrent: number; isScanning: boolean; lastScanTime: number; topSymbols: string[]; }

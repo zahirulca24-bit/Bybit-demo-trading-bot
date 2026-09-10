@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef } from "react";
 import { io, Socket } from "socket.io-client";
 import { AlertCircle } from "lucide-react";
-import { Position, TradeHistory, Technicals, Settings, KlineUpdatePayload, ScannerState } from "./types";
+import { Position, TradeHistory, Technicals, Settings, KlineUpdatePayload, ScannerState, RuntimeRiskProfile, RuntimeStatus } from "./types";
+import { apiRequest, QUICK_TEST_REQUESTED_QTY } from "./utils/frontendContract";
 import { Sidebar } from "./components/Sidebar";
 import { TerminalPage } from "./components/TerminalPage";
 import { ActiveTradesPage } from "./components/ActiveTradesPage";
@@ -36,6 +37,10 @@ export default function App() {
   const [logs, setLogs] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
+  const [riskProfile, setRiskProfile] = useState<RuntimeRiskProfile | null>(null);
+  const [historySource, setHistorySource] = useState<string | null>(null);
+  const [historyMetadataCoverage, setHistoryMetadataCoverage] = useState<string | null>(null);
 
   const [scannerState, setScannerState] = useState<ScannerState>({
     markets: [],
@@ -118,176 +123,31 @@ export default function App() {
   }, []);
 
   const fetchData = async () => {
-    setError(null);
-    try {
-      const [balanceRes, positionsRes, watchlistRes, settingsRes, summaryRes, techRes, botRes, scannerRes] = await Promise.all([
-        fetch("/api/balance").then(r => r.json()),
-        fetch("/api/positions").then(r => r.json()),
-        fetch("/api/watchlist").then(r => r.json()),
-        fetch("/api/settings").then(r => r.json()),
-        fetch("/api/history").then(r => r.json()).catch(() => ({ success: false })),
-        fetch("/api/technicals").then(r => r.json()),
-        fetch('/api/bot/status').then(r => r.json()).catch(() => ({ success: false })),
-        fetch("/api/scanner/state").then(r => r.json()).catch(() => ({ success: false })),
-      ]);
-
-      if (balanceRes.success) setBalance(balanceRes.balance);
-      if (positionsRes.success) setPositions(positionsRes.positions);
-      if (watchlistRes.success) setWatchlist(watchlistRes.watchlist);
-      if (settingsRes.success) setSettings(settingsRes.settings);
-
-      if (summaryRes.success && Array.isArray(summaryRes.history)) {
-        setHistory(summaryRes.history as TradeHistory[]);
-      }
-
-      if (techRes.success) setTechnicals(techRes.technicals);
-      if (botRes?.success && typeof botRes.running === "boolean") setIsBotRunning(botRes.running);
-      if (botRes?.success && typeof botRes.circuitBreaker === "boolean") setIsCircuitBreaker(botRes.circuitBreaker);
-      if (scannerRes?.success && scannerRes.state) setScannerState(scannerRes.state);
-      if (!balanceRes.success) setError(balanceRes.error);
-    } catch (err: any) {
-      setError("Failed to fetch data from server");
-    }
+    const reads = await Promise.allSettled([
+      apiRequest<any>("/api/balance"), apiRequest<any>("/api/positions"), apiRequest<any>("/api/watchlist"), apiRequest<any>("/api/settings"),
+      apiRequest<any>("/api/history"), apiRequest<any>("/api/technicals"), apiRequest<any>("/api/bot/status"), apiRequest<any>("/api/scanner/state"), apiRequest<any>("/api/runtime-status")
+    ]);
+    const value=(i:number)=>reads[i].status==="fulfilled"?(reads[i] as PromiseFulfilledResult<any>).value:null;
+    const balanceRes=value(0),positionsRes=value(1),watchlistRes=value(2),settingsRes=value(3),historyRes=value(4),techRes=value(5),botRes=value(6),scannerRes=value(7),runtimeRes=value(8);
+    if(balanceRes) setBalance(balanceRes.balance); if(positionsRes?.positions) setPositions(positionsRes.positions); if(watchlistRes?.watchlist) setWatchlist(watchlistRes.watchlist);
+    if(settingsRes?.settings) setSettings(settingsRes.settings); if(settingsRes?.riskProfile) setRiskProfile(settingsRes.riskProfile);
+    if(Array.isArray(historyRes?.history)){setHistory(historyRes.history);setHistorySource(historyRes.source??null);setHistoryMetadataCoverage(historyRes.metadataCoverage??null);}
+    if(techRes?.technicals) setTechnicals(techRes.technicals); if(typeof botRes?.running==="boolean") setIsBotRunning(botRes.running); if(typeof botRes?.circuitBreaker==="boolean") setIsCircuitBreaker(botRes.circuitBreaker);
+    if(scannerRes?.state) setScannerState(scannerRes.state); if(runtimeRes?.status) setRuntimeStatus(runtimeRes.status);
+    const rejected=reads.find(r=>r.status==="rejected") as PromiseRejectedResult|undefined; if(rejected) setError(rejected.reason instanceof Error?rejected.reason.message:"One or more backend reads failed"); else setError(null);
   };
 
-  const closePosition = async (symbol: string) => {
-    setError(null);
-    try {
-      const res = await fetch("/api/positions/close", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol }),
-      });
-      const data = await res.json();
-      if (!data.success) setError(data.message || `Failed to close position for ${symbol}`);
-      else await fetchData();
-    } catch (err: any) {
-      setError(`Error submitting close order for ${symbol}`);
-    }
-  };
-
-  const executeTestOrder = async (symbol: string = "BTCUSDT") => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/test-order", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol, qty: symbol.includes("BTC") ? "0.001" : undefined }),
-      });
-      const data = await res.json();
-      if (!data.success) setError(data.message || "Failed to execute manual test order");
-      else await fetchData();
-    } catch {
-      setError("Error submitting test order to Bybit");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const toggleScannerAutoTrade = async (autoTrade: boolean) => {
-    try {
-      const res = await fetch("/api/scanner/toggle-autotrade", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ autoTrade }),
-      });
-      const data = await res.json();
-      if (data.success) setScannerState((prev) => ({ ...prev, autoTrade: data.autoTrade }));
-    } catch {
-      console.error("Failed to toggle scanner auto-trade");
-    }
-  };
-
-  const triggerScanNow = async () => {
-    try {
-      setScannerState((prev) => ({ ...prev, isScanning: true }));
-      const res = await fetch("/api/scanner/scan-now", { method: "POST" });
-      const data = await res.json();
-      if (data.success && data.state) setScannerState(data.state);
-    } catch {
-      console.error("Failed to scan markets");
-    } finally {
-      setScannerState((prev) => ({ ...prev, isScanning: false }));
-    }
-  };
-
-  const refreshTopMarkets = async () => {
-    try {
-      setScannerState((prev) => ({ ...prev, isScanning: true }));
-      const res = await fetch("/api/scanner/refresh-markets", { method: "POST" });
-      const data = await res.json();
-      if (data.success && data.state) setScannerState(data.state);
-    } catch {
-      console.error("Failed to refresh market rankings");
-    } finally {
-      setScannerState((prev) => ({ ...prev, isScanning: false }));
-    }
-  };
-
-  const setScannerMaxConcurrent = async (maxConcurrent: number) => {
-    try {
-      const res = await fetch("/api/scanner/max-concurrent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ maxConcurrent }),
-      });
-      const data = await res.json();
-      if (data.success) setScannerState((prev) => ({ ...prev, maxConcurrent: data.maxConcurrent }));
-    } catch {
-      console.error("Failed to set max concurrent slots");
-    }
-  };
-
-  useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 10000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const toggleBot = async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const endpoint = isBotRunning ? "/api/bot/stop" : "/api/bot/start";
-      const res = await fetch(endpoint, { method: "POST" });
-      const data = await res.json();
-      if (!data.success) setError(data.message);
-    } catch {
-      setError("Failed to toggle bot");
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const toggleWatchlist = async (symbol: string, remove: boolean) => {
-    try {
-      const endpoint = remove ? "/api/watchlist/remove" : "/api/watchlist/add";
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol })
-      });
-      const data = await res.json();
-      if (data.success) setWatchlist(data.watchlist);
-    } catch {
-      console.error("Failed to update watchlist");
-    }
-  };
-
-  const updateSetting = async (key: string, value: number) => {
-    const newSettings = { ...settings, [key]: value };
-    setSettings(newSettings);
-    try {
-      await fetch("/api/settings", {
-        method: "POST",
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ settings: newSettings })
-      });
-    } catch {
-      console.error("Failed to save settings");
-    }
-  };
+  const closePosition = async (symbol: string) => { setError(null); try { await apiRequest<any>("/api/positions/close", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({symbol}) }); await fetchData(); } catch(err:any){ setError(err.message || `Failed to close ${symbol}`); throw err; } };
+  const executeTestOrder = async (symbol: string = "BTCUSDT") => { setIsLoading(true); setError(null); try { await apiRequest<any>("/api/test-order", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({symbol,qty:QUICK_TEST_REQUESTED_QTY}) }); await fetchData(); } catch(err:any){ setError(err.message || "Failed to execute Quick Test order"); } finally { setIsLoading(false); } };
+  const toggleScannerAutoTrade = async (autoTrade:boolean) => { setError(null); try { const data=await apiRequest<any>("/api/scanner/toggle-autotrade",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({autoTrade})}); setScannerState(prev=>({...prev,autoTrade:Boolean(data.autoTrade)})); } catch(err:any){ setError(err.message); } };
+  const triggerScanNow = async () => { const previous=scannerState; setScannerState(prev=>({...prev,isScanning:true})); setError(null); try { const data=await apiRequest<any>("/api/scanner/scan-now",{method:"POST"}); if(data.state)setScannerState(data.state); } catch(err:any){ setScannerState(previous); setError(err.message); } finally { setScannerState(prev=>({...prev,isScanning:false})); } };
+  const refreshTopMarkets = async () => { const previous=scannerState; setScannerState(prev=>({...prev,isScanning:true})); setError(null); try { const data=await apiRequest<any>("/api/scanner/refresh-markets",{method:"POST"}); if(data.state)setScannerState(data.state); } catch(err:any){ setScannerState(previous); setError(err.message); } finally { setScannerState(prev=>({...prev,isScanning:false})); } };
+  const setScannerMaxConcurrent = async (maxConcurrent:number) => { setError(null); try { const data=await apiRequest<any>("/api/scanner/max-concurrent",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({maxConcurrent})}); setScannerState(prev=>({...prev,maxConcurrent:Number(data.maxConcurrent)})); } catch(err:any){ setError(err.message); } };
+  useEffect(()=>{void fetchData(); const interval=setInterval(()=>void fetchData(),10000); return()=>clearInterval(interval);},[]);
+  const toggleBot = async () => { setIsLoading(true); setError(null); try { await apiRequest<any>(isBotRunning?"/api/bot/stop":"/api/bot/start",{method:"POST"}); await fetchData(); } catch(err:any){ setError(err.message || "Failed to change engine state"); } finally { setIsLoading(false); } };
+  const resetCircuitBreaker = async () => { setError(null); try { await apiRequest<any>("/api/bot/reset-circuit-breaker",{method:"POST"}); await fetchData(); } catch(err:any){ setError(err.message || "Failed to reset circuit breaker"); } };
+  const toggleWatchlist = async (symbol:string,remove:boolean) => { setError(null); try { const data=await apiRequest<any>(remove?"/api/watchlist/remove":"/api/watchlist/add",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbol})}); if(Array.isArray(data.watchlist))setWatchlist(data.watchlist); } catch(err:any){ setError(err.message || "Failed to update watchlist"); } };
+  const updateSetting = async (key:string,value:number) => { const previous=settings; const next={...settings,[key]:value}; setSettings(next); setError(null); try { const data=await apiRequest<any>("/api/settings",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({settings:next})}); if(data.settings)setSettings(data.settings); } catch(err:any){ setSettings(previous); setError(err.message || "Failed to save settings"); } };
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 font-sans flex">
@@ -298,6 +158,7 @@ export default function App() {
         isBotRunning={isBotRunning}
         demoTrading={settings?.demoTrading}
         connectionStatus={connectionStatus}
+        runtimeStatus={runtimeStatus}
       />
 
       <div className="flex-1 ml-64 p-8 overflow-y-auto h-screen">
@@ -316,6 +177,7 @@ export default function App() {
               isCircuitBreaker={isCircuitBreaker}
               isLoading={isLoading}
               toggleBot={toggleBot}
+              onResetCircuitBreaker={resetCircuitBreaker}
               watchlist={watchlist}
               prices={prices}
               positions={positions}
@@ -352,16 +214,19 @@ export default function App() {
               onRefreshMarkets={refreshTopMarkets}
               onSetMaxConcurrent={setScannerMaxConcurrent}
               onQuickBuy={executeTestOrder}
+              riskProfile={riskProfile}
             />
           )}
 
-          {activeTab === 'history' && <HistoryPage history={history} />}
+          {activeTab === 'history' && <HistoryPage history={history} source={historySource} metadataCoverage={historyMetadataCoverage} />}
 
           {activeTab === 'settings' && (
             <SettingsPage
               settings={settings}
               updateSetting={updateSetting}
               systemLogs={logs}
+              riskProfile={riskProfile}
+              runtimeStatus={runtimeStatus}
             />
           )}
         </div>

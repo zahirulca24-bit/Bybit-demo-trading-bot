@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Plus, X, Activity, ShieldCheck, Zap, Layers, RefreshCw } from "lucide-react";
-import { Technicals, TradeHistory, KlineUpdatePayload, ScannerState, Position, PipelineState } from "../types";
+import { Technicals, TradeHistory, KlineUpdatePayload, ScannerState, Position, PipelineState, RuntimeRiskProfile } from "../types";
+import { apiRequest } from "../utils/frontendContract";
 import { SixGatePipelineVisualizer } from "./SixGatePipelineVisualizer";
 import { ScannedPairsTable } from "./ScannedPairsTable";
 import { HighDensityScannerGrid } from "./HighDensityScannerGrid";
@@ -20,6 +21,7 @@ interface StrategyPageProps {
   onRefreshMarkets: () => void;
   onSetMaxConcurrent: (max: number) => void;
   onQuickBuy: (symbol: string) => void;
+  riskProfile?: RuntimeRiskProfile | null;
 }
 
 export function StrategyPage({
@@ -36,23 +38,25 @@ export function StrategyPage({
   onRefreshMarkets,
   onSetMaxConcurrent,
   onQuickBuy,
+  riskProfile = null,
 }: StrategyPageProps) {
   const [selectedSymbol, setSelectedSymbol] = useState<string>("BTCUSDT");
   const [activeTab, setActiveTab] = useState<"pipeline" | "5m_grid" | "turnover">("pipeline");
   const [pipelineData, setPipelineData] = useState<PipelineState | null>(null);
   const [isPipelineScanning, setIsPipelineScanning] = useState<boolean>(true);
+  const [pipelineError, setPipelineError] = useState<string | null>(null);
 
   const activeSymbol = selectedSymbol || watchlist[0] || "BTCUSDT";
 
   const fetchPipeline = async (forceRefresh = false) => {
     setIsPipelineScanning(true);
     try {
+      setPipelineError(null);
       const url = forceRefresh ? "/api/scanner/pipeline/scan-now" : "/api/scanner/pipeline";
-      const res = await (forceRefresh ? fetch(url, { method: "POST" }) : fetch(url));
-      const data = await res.json();
-      if (data.success && data.pipeline) setPipelineData(data.pipeline);
-    } catch (err) {
-      console.error("Failed to fetch pipeline data:", err);
+      const data = await apiRequest<any>(url, forceRefresh ? { method: "POST" } : undefined);
+      if (data.pipeline) setPipelineData(data.pipeline);
+    } catch (err: any) {
+      setPipelineError(err?.message || "Failed to fetch scanner pipeline");
     } finally {
       setIsPipelineScanning(false);
     }
@@ -64,24 +68,17 @@ export function StrategyPage({
     return () => clearInterval(interval);
   }, []);
 
-  const executionControls = [
-    "EMA50/200 = hard trend filter",
-    "EMA9/21 = soft entry timing / quality confirmation",
-    "Breakout = soft bonus only",
-    "Max positions 3",
-    "$50 margin at 10x (~$500 notional)",
-    "No duplicate same-symbol position",
-    "10m same-symbol post-close cooldown",
-    "Daily -$50 net entry breaker",
-    "3 losses => 30m pause",
-    "Breaker blocks new entries only",
-    "Adaptive SL: ATR14 confirmed 5m, multiplier 1.20x–1.50x",
-    "Structure: recent 6 confirmed 5m candles; swing ± 0.15×ATR",
-    "Initial SL distance: 1.00%–1.80%; wider SL reduces notional",
-    "BE/trailing trigger: max(1.00%, initial SL distance, 1.25×ATR%)",
-    "Trailing starts after the same threshold and only tightens risk",
-    "SL never widened",
-  ];
+  const executionControls = riskProfile ? [
+    `Max positions ${riskProfile.maxPositions}`,
+    `$${riskProfile.positionMarginUsdt} margin at ${riskProfile.leverage}x (~$${riskProfile.baseNotionalUsdt} notional)`,
+    riskProfile.duplicateSymbolBlocked ? "No duplicate same-symbol position" : "Duplicate-symbol policy backend-defined",
+    `${Math.round(riskProfile.sameSymbolCooldownMs / 60000)}m same-symbol post-close cooldown`,
+    `Daily ${riskProfile.dailyEntryBreakerNetUsdt} USDT net entry breaker`,
+    `3 losses => ${Math.round(riskProfile.consecutiveLossPauseMs / 60000)}m pause`,
+    riskProfile.breakerScope === "new_entries_only" ? "Breaker blocks new entries only" : `Breaker scope: ${riskProfile.breakerScope}`,
+    `Initial SL distance: ${riskProfile.adaptiveSlMinPercent.toFixed(2)}%–${riskProfile.adaptiveSlMaxPercent.toFixed(2)}%`,
+    riskProfile.stopLossNeverWidens ? "SL never widened" : "SL widening policy backend-defined",
+  ] : [];
 
   return (
     <div className="space-y-6">
@@ -115,6 +112,7 @@ export function StrategyPage({
         </div>
       </header>
 
+      {pipelineError && <div className="bg-rose-500/10 border border-rose-500/30 rounded-xl px-4 py-3 text-sm text-rose-300">{pipelineError}</div>}
       {activeTab === "pipeline" && (
         <div className="space-y-6">
           <SixGatePipelineVisualizer
@@ -164,11 +162,9 @@ export function StrategyPage({
           <div className="bg-neutral-950 p-3 sm:p-4 rounded-lg border border-neutral-800/80">
             <div className="font-bold text-amber-400 uppercase tracking-wider text-[11px] mb-2">Execution & Risk Controls</div>
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-x-4 gap-y-1.5 text-[11px] text-neutral-300">
-              {executionControls.map((control) => (
-                <div key={control} className="flex items-start gap-1.5">
-                  <span className="text-amber-400">•</span><span>{control}</span>
-                </div>
-              ))}
+              {executionControls.length ? executionControls.map((control) => (
+                <div key={control} className="flex items-start gap-1.5"><span className="text-amber-400">•</span><span>{control}</span></div>
+              )) : <div className="text-amber-300">Runtime risk profile unavailable.</div>}
             </div>
           </div>
 
