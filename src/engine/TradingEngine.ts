@@ -114,6 +114,13 @@ type PositionRiskState = {
   openingOrderLinkId?: string;
 };
 
+type PendingCloseIntent = {
+  kind: "manual" | "trail";
+  orderId?: string;
+  orderLinkId: string;
+  submittedAt: number;
+};
+
 export class TradingEngine {
   private isRunning = false;
   public circuitBreakerTriggered = false;
@@ -142,6 +149,7 @@ export class TradingEngine {
   };
 
   private positionState: Record<string, PositionRiskState> = {};
+  private pendingCloseIntents: Record<string, PendingCloseIntent> = {};
   private isProcessingTrade: Record<string, boolean> = {};
   private syncTimer: NodeJS.Timeout | null = null;
   private lastRiskLogAt = 0;
@@ -195,8 +203,21 @@ export class TradingEngine {
       if (this.isRunning) void this.checkTrailingStopAndBreakEven(payload.symbol, payload.price);
     });
 
-    this.wsManager.on("position", (positions: any[]) => {
-      this.activePositions = positions.filter((p) => Number(p.size || 0) > 0);
+    this.wsManager.on("position", (updates: any[]) => {
+      // Bybit private position messages are incremental updates, not guaranteed full snapshots.
+      // Merge by symbol so an update for one position cannot temporarily erase other live positions.
+      const merged = new Map<string, any>(
+        this.activePositions
+          .filter((p) => p?.symbol && Number(p.size || 0) > 0)
+          .map((p) => [String(p.symbol), p])
+      );
+      for (const update of updates || []) {
+        const symbol = String(update?.symbol || "");
+        if (!symbol) continue;
+        if (Number(update.size || 0) > 0) merged.set(symbol, { ...(merged.get(symbol) || {}), ...update });
+        else merged.delete(symbol);
+      }
+      this.activePositions = [...merged.values()];
       this.emitter.updatePositions(this.activePositions);
     });
 
@@ -222,6 +243,10 @@ export class TradingEngine {
 
   private makeCloseOrderLinkId(kind: "manual" | "trail"): string {
     return `bot-${kind}-${Date.now().toString(36)}`;
+  }
+
+  private rememberCloseIntent(symbol: string, kind: "manual" | "trail", orderId: string | undefined, orderLinkId: string) {
+    this.pendingCloseIntents[symbol] = { kind, orderId, orderLinkId, submittedAt: Date.now() };
   }
 
   private isCandidateStopTighter(side: "Buy" | "Sell", currentStop: number, candidateStop: number): boolean {
@@ -370,7 +395,19 @@ export class TradingEngine {
       const positions = await this.riskManager.getOpenPositions();
       const currentSymbols = new Set(positions.map((p) => p.symbol));
 
+      // Restore ticker management after a process restart for any position that was
+      // opened before this process instance started.
+      for (const pos of positions) {
+        const symbol = String(pos.symbol || "");
+        if (symbol && !this.watchlist.includes(symbol)) await this.addSymbol(symbol);
+      }
+
       for (const symbol of previousSymbols) {
+        if (!currentSymbols.has(symbol)) await this.recordLatestClosedTrade(symbol);
+      }
+      // A locally submitted trailing/manual close may disappear from activePositions
+      // before Closed PnL is ready. Keep retrying reconciliation while the intent exists.
+      for (const symbol of Object.keys(this.pendingCloseIntents)) {
         if (!currentSymbols.has(symbol)) await this.recordLatestClosedTrade(symbol);
       }
 
@@ -384,7 +421,9 @@ export class TradingEngine {
           this.positionState[pos.symbol] = { peakPrice: price, breakEvenSet: false, initialStopLoss: currentStop || undefined, initialRiskPercent };
         }
       }
-      for (const symbol of Object.keys(this.positionState)) if (!currentSymbols.has(symbol)) delete this.positionState[symbol];
+      for (const symbol of Object.keys(this.positionState)) {
+        if (!currentSymbols.has(symbol) && !this.pendingCloseIntents[symbol]) delete this.positionState[symbol];
+      }
       this.emitter.updatePositions(positions);
       await this.checkCircuitBreaker();
     } catch {
@@ -394,8 +433,13 @@ export class TradingEngine {
 
   private async recordLatestClosedTrade(symbol: string) {
     try {
-      const res = await this.bybit.getClosedPnL({ category: "linear", symbol, limit: 1 });
-      const item: any = res.retCode === 0 ? res.result?.list?.[0] : null;
+      let item: any = null;
+      for (const delay of [0, 300, 900]) {
+        if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+        const res = await this.bybit.getClosedPnL({ category: "linear", symbol, limit: 1 });
+        item = res.retCode === 0 ? res.result?.list?.[0] : null;
+        if (item) break;
+      }
       if (!item) return;
       const pnl = Number(item.closedPnl || 0);
       const entryPrice = Number(item.avgEntryPrice || 0);
@@ -414,10 +458,21 @@ export class TradingEngine {
         this.bybit.getExecutionList({ category: "linear", symbol, startTime: windowStart, endTime: windowEnd, limit: 100 }).catch(() => null),
         this.bybit.getHistoricOrders({ category: "linear", symbol, startTime: windowStart, endTime: windowEnd, limit: 100 }).catch(() => null),
       ]);
+      const closeIntent = this.pendingCloseIntents[symbol];
+      const intentEvidence = closeIntent ? [{
+        symbol,
+        orderId: closeIntent.orderId,
+        orderLinkId: closeIntent.orderLinkId,
+        reduceOnly: true,
+        updatedTime: closeIntent.submittedAt,
+      }] : [];
       const classified = classifyClosedTradeExit({
         closedTrade: item,
         executions: execRes?.retCode === 0 ? (execRes.result?.list || []) : [],
-        orders: orderRes?.retCode === 0 ? (orderRes.result?.list || []) : [],
+        orders: [
+          ...intentEvidence,
+          ...(orderRes?.retCode === 0 ? (orderRes.result?.list || []) : []),
+        ],
         localHistory: this.tradeHistory,
       });
       const trade = { id, symbol, side, entryPrice, exitPrice, qty, reason: classified.label, pnl, pnlPercent, time, exitAudit: classified };
@@ -425,7 +480,12 @@ export class TradingEngine {
       this.emitter.tradeUpdate(trade);
       this.telegram.sendTradeClosed(symbol, exitPrice, classified.label, pnl, pnlPercent);
       const openingOrderId = this.positionState[symbol]?.openingOrderId || null;
-      dbRecordTrade({ symbol, side: item.side === "Buy" || item.side === "Sell" ? item.side : side, entryPrice: Number.isFinite(entryPrice) ? entryPrice : null, exitPrice: Number.isFinite(exitPrice) ? exitPrice : null, actualQty: Number.isFinite(qty) ? qty : null, status: "CLOSED", exitReason: classified.label, exitAudit: classified, source: openingOrderId ? undefined : "external", openingOrderId, closingOrderId: item.orderId || null, closingOrderLinkId: item.orderLinkId || null, realizedPnl: Number.isFinite(pnl) ? pnl : null, closedAt: time, sizeNotional: entryNotional > 0 ? entryNotional : null, marginUsed: null, leverage: Number(item.leverage) > 0 ? Number(item.leverage) : null });
+      const persisted = await dbRecordTrade({ symbol, side, entryPrice: Number.isFinite(entryPrice) ? entryPrice : null, exitPrice: Number.isFinite(exitPrice) ? exitPrice : null, actualQty: Number.isFinite(qty) ? qty : null, status: "CLOSED", exitReason: classified.label, exitAudit: classified, source: openingOrderId ? undefined : "external", openingOrderId, closingOrderId: item.orderId || closeIntent?.orderId || null, closingOrderLinkId: item.orderLinkId || closeIntent?.orderLinkId || null, realizedPnl: Number.isFinite(pnl) ? pnl : null, closedAt: time, sizeNotional: entryNotional > 0 ? entryNotional : null, marginUsed: null, leverage: Number(item.leverage) > 0 ? Number(item.leverage) : null });
+      if (!persisted.ok) {
+        this.emitter.log(`[${symbol}] Trade lifecycle persistence warning: ${persisted.error || "unknown database error"}`);
+      } else if (closeIntent) {
+        delete this.pendingCloseIntents[symbol];
+      }
     } catch (err: any) {
       this.emitter.log(`[${symbol}] Closed-PnL reconciliation warning: ${err.message}`);
     }
@@ -637,6 +697,7 @@ export class TradingEngine {
 
     this.isProcessingTrade[symbol] = true;
     try {
+      const orderLinkId = this.makeCloseOrderLinkId("trail");
       const closeRes = await this.bybit.submitOrder({
         category: "linear",
         symbol,
@@ -645,13 +706,11 @@ export class TradingEngine {
         qty: String(pos.size),
         reduceOnly: true,
         timeInForce: "IOC",
-        orderLinkId: this.makeCloseOrderLinkId("trail"),
+        orderLinkId,
       });
       if (closeRes.retCode === 0) {
-        this.emitter.log(`[${symbol}] Trailing stop exit submitted.`);
-        this.activePositions = this.activePositions.filter((p) => p.symbol !== symbol);
-        delete this.positionState[symbol];
-        this.emitter.updatePositions(this.activePositions);
+        this.rememberCloseIntent(symbol, "trail", closeRes.result?.orderId, orderLinkId);
+        this.emitter.log(`[${symbol}] Trailing stop exit submitted; awaiting exchange close confirmation.`);
         setTimeout(() => void this.syncPositions(), 500);
       }
     } catch (err: any) {
@@ -744,6 +803,7 @@ export class TradingEngine {
     const pos = this.activePositions.find((p) => p.symbol === target && Number(p.size || 0) > 0);
     if (!pos) return { success: false, message: `No active position found for ${target}` };
     try {
+      const orderLinkId = this.makeCloseOrderLinkId("manual");
       const result = await this.bybit.submitOrder({
         category: "linear",
         symbol: target,
@@ -752,12 +812,10 @@ export class TradingEngine {
         qty: String(pos.size),
         reduceOnly: true,
         timeInForce: "IOC",
-        orderLinkId: this.makeCloseOrderLinkId("manual"),
+        orderLinkId,
       });
       if (result.retCode !== 0) return { success: false, message: result.retMsg || "Bybit rejected close" };
-      this.activePositions = this.activePositions.filter((p) => p.symbol !== target);
-      delete this.positionState[target];
-      this.emitter.updatePositions(this.activePositions);
+      this.rememberCloseIntent(target, "manual", result.result?.orderId, orderLinkId);
       setTimeout(() => void this.syncPositions(), 500);
       return { success: true, message: `Successfully closed ${target}.` };
     } catch (err: any) {
@@ -772,6 +830,7 @@ export class TradingEngine {
       const positions = await this.riskManager.getOpenPositions();
       for (const pos of positions) {
         try {
+          const orderLinkId = this.makeCloseOrderLinkId("manual");
           const result = await this.bybit.submitOrder({
             category: "linear",
             symbol: pos.symbol,
@@ -780,10 +839,13 @@ export class TradingEngine {
             qty: String(pos.size),
             reduceOnly: true,
             timeInForce: "IOC",
-            orderLinkId: this.makeCloseOrderLinkId("manual"),
+            orderLinkId,
           });
           const success = result.retCode === 0;
-          if (success) closedCount++;
+          if (success) {
+            closedCount++;
+            this.rememberCloseIntent(pos.symbol, "manual", result.result?.orderId, orderLinkId);
+          }
           results.push({ symbol: pos.symbol, success, orderId: result.result?.orderId, error: success ? undefined : result.retMsg });
         } catch (err: any) {
           results.push({ symbol: pos.symbol, success: false, error: err.message });
