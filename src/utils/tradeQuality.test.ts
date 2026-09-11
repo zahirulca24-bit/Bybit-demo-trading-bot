@@ -48,8 +48,19 @@ assert.equal(
     closedTrade: closedLoss,
     orders: [{ symbol: "BTCUSDT", orderId: "c1", stopOrderType: "StopLoss", orderLinkId: "bot-manual-x", updatedTime: 1_800_000 }],
   }).category,
-  "SL",
-  "exact SL metadata outranks app manual marker"
+  "MANUAL",
+  "explicit bot manual close identity must outrank stale stop metadata"
+);
+assert.equal(
+  classifyClosedTradeExit({
+    closedTrade: closedWin,
+    orders: [
+      { symbol: "BTCUSDT", orderId: "c2", orderLinkId: "bot-trail-exact", reduceOnly: true, updatedTime: 1_800_000 },
+      { symbol: "BTCUSDT", orderId: "other-sl", stopOrderType: "StopLoss", reduceOnly: true, updatedTime: 1_800_001, qty: "1" },
+    ],
+  }).category,
+  "TRAILING",
+  "exact bot trailing close must outrank a nearby SL record"
 );
 
 const longPlan = calculateAdaptiveStopPlan({ side: "Buy", entryPrice: 100, atr: 1.2, swingPrice: 98.0 });
