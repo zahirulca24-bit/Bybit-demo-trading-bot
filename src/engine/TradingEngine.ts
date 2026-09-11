@@ -7,6 +7,7 @@ import { dbRecordReportEvent, dbRecordTrade, dbUpdateOpenTradeFill } from "../db
 import { ATR } from "technicalindicators";
 import { getUtcDayStartMs, normalizeTimestampMs } from "../utils/utcTradingDay";
 import { classifyClosedTradeExit } from "../utils/exitClassification";
+import { selectClosedPnlForIntent } from "../utils/closeReconciliation";
 import { calculateAdaptiveStopPlan, calculateRiskAdjustedNotional, AdaptiveStopPlan } from "../utils/adaptiveStop";
 import { buildRiskAccounting, evaluateEntryRiskAccounting, fetchClosedPnlRange, RISK_DATA_UNAVAILABLE } from "../utils/dailyRiskAccounting";
 import { bangladeshDateForTimestamp } from "../utils/tradingReports";
@@ -433,14 +434,21 @@ export class TradingEngine {
 
   private async recordLatestClosedTrade(symbol: string) {
     try {
+      const closeIntent = this.pendingCloseIntents[symbol];
       let item: any = null;
       for (const delay of [0, 300, 900]) {
         if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
-        const res = await this.bybit.getClosedPnL({ category: "linear", symbol, limit: 1 });
-        item = res.retCode === 0 ? res.result?.list?.[0] : null;
+        const res = await this.bybit.getClosedPnL({ category: "linear", symbol, limit: 10 });
+        const rows = res.retCode === 0 ? (res.result?.list || []) : [];
+        item = selectClosedPnlForIntent(rows, closeIntent);
         if (item) break;
       }
-      if (!item) return;
+      if (!item) {
+        if (closeIntent) {
+          this.emitter.log(`[${symbol}] Close reconciliation pending: exact closing order is not visible in Closed PnL yet.`);
+        }
+        return;
+      }
       const pnl = Number(item.closedPnl || 0);
       const entryPrice = Number(item.avgEntryPrice || 0);
       const exitPrice = Number(item.avgExitPrice || 0);
@@ -458,7 +466,6 @@ export class TradingEngine {
         this.bybit.getExecutionList({ category: "linear", symbol, startTime: windowStart, endTime: windowEnd, limit: 100 }).catch(() => null),
         this.bybit.getHistoricOrders({ category: "linear", symbol, startTime: windowStart, endTime: windowEnd, limit: 100 }).catch(() => null),
       ]);
-      const closeIntent = this.pendingCloseIntents[symbol];
       const intentEvidence = closeIntent ? [{
         symbol,
         orderId: closeIntent.orderId,
