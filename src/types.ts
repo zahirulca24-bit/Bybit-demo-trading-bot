@@ -128,6 +128,7 @@ export interface ScannedMarketItem {
   symbol: string; price?: number; lastPrice: number; turnover24h: number; volume24h: number; price24hPcnt: number; highPrice24h: number; lowPrice24h: number;
   rsi: number; ema50: number; ema200: number; ema9?: number; ema21?: number;
   ema9Above21?: boolean; ema9Slope?: number; ema21Slope?: number; freshCross?: "bullish" | "bearish" | "none"; crossoverAgeCandles?: number | null; emaTimingScore?: number; finalSetupScore?: number; emaTimingState?: "Bullish" | "Bearish" | "Neutral" | "Unavailable"; emaTimingChoppy?: boolean;
+  smcConfirmed?: boolean; liquiditySweep?: boolean; mssConfirmed?: boolean; displacementConfirmed?: boolean; fvgConfirmed?: boolean; fvgRetested?: boolean; rejectionConfirmed?: boolean; smcReason?: string; smcSweepLevel?: number | null; smcMssLevel?: number | null; smcFvgLow?: number | null; smcFvgHigh?: number | null; smcRejectionType?: "ENGULFING" | "WICK_REJECTION" | "STRONG_CLOSE" | null;
   trend15m: "Bullish HTF" | "Bearish HTF" | "Neutral HTF";
   spreadPcnt: number; atr?: number; atrPcnt: number; oiPositive: boolean; oiChangePercent?: number; breakoutBonus?: boolean; entryCandleDirection?: "Bullish" | "Bearish" | "Doji"; gatePassed: number;
   trend: "Bullish" | "Bearish" | "Neutral";

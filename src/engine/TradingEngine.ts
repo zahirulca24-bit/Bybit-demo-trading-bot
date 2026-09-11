@@ -103,6 +103,19 @@ export interface ScannerEntryQualityContext {
   finalSetupScore?: number;
   emaTimingState?: string;
   emaTimingChoppy?: boolean;
+  smcConfirmed?: boolean;
+  liquiditySweep?: boolean;
+  mssConfirmed?: boolean;
+  displacementConfirmed?: boolean;
+  fvgConfirmed?: boolean;
+  fvgRetested?: boolean;
+  rejectionConfirmed?: boolean;
+  smcReason?: string;
+  smcSweepLevel?: number | null;
+  smcMssLevel?: number | null;
+  smcFvgLow?: number | null;
+  smcFvgHigh?: number | null;
+  smcRejectionType?: "ENGULFING" | "WICK_REJECTION" | "STRONG_CLOSE" | null;
 }
 
 type PositionRiskState = {
@@ -585,7 +598,7 @@ export class TradingEngine {
       await this.ensureLeverage(targetSymbol);
 
       this.emitter.log(`⚡ [Scanner Execution] ${side === "Buy" ? "LONG" : "SHORT"} ${targetSymbol} | Margin cap $${this.settings.positionMarginUsdt} | Used ~$${actualMargin.toFixed(2)} | Notional ~$${actualNotional.toFixed(2)} | TP ${takeProfit} | SL ${stopLoss}`);
-      this.emitter.log(`[Trade Quality] ${targetSymbol} RSI=${rsi.toFixed(1)} ATR%=${stopPlan.atrPercent.toFixed(3)} OI=${quality?.oiExpansionPercent?.toFixed(3) ?? "N/A"}% Spread=${quality?.spreadPercent?.toFixed(3) ?? "N/A"}% Trend=${quality?.trendState ?? "N/A"} EMA9=${quality?.ema9?.toFixed(6) ?? "N/A"} EMA21=${quality?.ema21?.toFixed(6) ?? "N/A"} Timing=${quality?.emaTimingScore?.toFixed(2) ?? "N/A"}/2 Cross=${quality?.freshCross ?? "none"}@${quality?.crossoverAgeCandles ?? "N/A"} Setup=${quality?.finalSetupScore?.toFixed(2) ?? "N/A"} BreakoutBonus=${Boolean(quality?.breakoutBonus)} Candle=${quality?.entryCandleDirection ?? "N/A"} SL=${stopPlan.stopDistancePercent.toFixed(3)}% (${stopPlan.stopDistanceAtrMultiple.toFixed(2)} ATR) Reason=${stopPlan.reason}`);
+      this.emitter.log(`[Trade Quality] ${targetSymbol} RSI=${rsi.toFixed(1)} ATR%=${stopPlan.atrPercent.toFixed(3)} OI=${quality?.oiExpansionPercent?.toFixed(3) ?? "N/A"}% Spread=${quality?.spreadPercent?.toFixed(3) ?? "N/A"}% Trend=${quality?.trendState ?? "N/A"} SMC=${Boolean(quality?.smcConfirmed)} Sweep=${Boolean(quality?.liquiditySweep)} MSS=${Boolean(quality?.mssConfirmed)} FVG=${Boolean(quality?.fvgConfirmed)} Retest=${Boolean(quality?.fvgRetested)} Reject=${quality?.smcRejectionType ?? "N/A"} EMA9=${quality?.ema9?.toFixed(6) ?? "N/A"} EMA21=${quality?.ema21?.toFixed(6) ?? "N/A"} Timing=${quality?.emaTimingScore?.toFixed(2) ?? "N/A"}/2 Setup=${quality?.finalSetupScore?.toFixed(2) ?? "N/A"} SL=${stopPlan.stopDistancePercent.toFixed(3)}% (${stopPlan.stopDistanceAtrMultiple.toFixed(2)} ATR) Reason=${stopPlan.reason}`);
       const openingOrderLinkId = `app-scan-${Date.now().toString(36)}`;
       const orderRes = await this.bybit.submitOrder({
         category: "linear", symbol: targetSymbol, side, orderType: "Market", qty: pre.qty, timeInForce: "IOC", takeProfit, stopLoss, orderLinkId: openingOrderLinkId,
@@ -638,6 +651,19 @@ export class TradingEngine {
           finalSetupScore: quality?.finalSetupScore ?? 6,
           emaTimingState: quality?.emaTimingState ?? "Unavailable",
           emaTimingChoppy: quality?.emaTimingChoppy ?? false,
+          smcConfirmed: quality?.smcConfirmed ?? false,
+          liquiditySweep: quality?.liquiditySweep ?? false,
+          mssConfirmed: quality?.mssConfirmed ?? false,
+          displacementConfirmed: quality?.displacementConfirmed ?? false,
+          fvgConfirmed: quality?.fvgConfirmed ?? false,
+          fvgRetested: quality?.fvgRetested ?? false,
+          rejectionConfirmed: quality?.rejectionConfirmed ?? false,
+          smcReason: quality?.smcReason ?? null,
+          smcSweepLevel: quality?.smcSweepLevel ?? null,
+          smcMssLevel: quality?.smcMssLevel ?? null,
+          smcFvgLow: quality?.smcFvgLow ?? null,
+          smcFvgHigh: quality?.smcFvgHigh ?? null,
+          smcRejectionType: quality?.smcRejectionType ?? null,
           slDistancePercent: stopPlan.stopDistancePercent,
           slDistanceAtrMultiple: stopPlan.stopDistanceAtrMultiple,
           slReason: stopPlan.reason,
