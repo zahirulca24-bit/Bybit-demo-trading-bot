@@ -31,7 +31,32 @@ assert.equal(db.includes("Persistent DB configured; refusing ephemeral trade-wri
 const engine = fs.readFileSync("src/engine/TradingEngine.ts", "utf8");
 assert.equal(engine.includes("submittedQty: qty"), true, "manual submitted quantity persisted");
 assert.equal(engine.includes("reconcileOpenFill(orderId)"), true, "actual fill reconciliation enabled");
-assert.equal(engine.includes("closingOrderId: item.orderId || null"), true, "closing identity persisted");
+assert.equal(engine.includes("closingOrderId: item.orderId || closeIntent?.orderId || null"), true, "closing identity persisted");
 const history = fs.readFileSync("src/components/HistoryPage.tsx", "utf8");
 for (const label of ["Realized PnL USDT", "Price Move %", "Return on Notional %", "ROE %", "Zero-or-Unknown"]) assert.equal(history.includes(label), true, `HistoryPage label: ${label}`);
 console.log("trade history integrity regression tests passed");
+
+
+{
+  const longFromSellClose = normalizeClosedPnlRow({
+    symbol: "SOLUSDT",
+    side: "Sell",
+    closedSize: "1",
+    avgEntryPrice: "100",
+    avgExitPrice: "99",
+    closedPnl: "-1",
+    updatedTime: 1_800_000,
+  });
+  assert.equal(longFromSellClose.side, "Buy", "closed PnL side should normalize to original LONG position side");
+
+  const shortFromBuyClose = normalizeClosedPnlRow({
+    symbol: "SOLUSDT",
+    side: "Buy",
+    closedSize: "1",
+    avgEntryPrice: "100",
+    avgExitPrice: "99",
+    closedPnl: "1",
+    updatedTime: 1_800_000,
+  });
+  assert.equal(shortFromBuyClose.side, "Sell", "closed PnL side should normalize to original SHORT position side");
+}

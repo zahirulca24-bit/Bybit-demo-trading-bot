@@ -301,17 +301,8 @@ async function startServer() {
       const { symbol, side, qty } = req.body;
       if (!symbol) return sendApiError(res, 400, "Missing symbol in request body");
       const targetSymbol = symbol.toUpperCase();
-      if (side && qty) {
-        const closeSide = side === "Buy" ? "Sell" : "Buy";
-        const orderRes = await bybit.submitOrder({
-          category: "linear", symbol: targetSymbol, side: closeSide, orderType: "Market", qty: qty.toString(), reduceOnly: true, timeInForce: "IOC", orderLinkId: `app-manual-${Date.now().toString(36)}`,
-        });
-        if (orderRes.retCode === 0) {
-          engine.emitter.log(`[Manual Close] Closed ${targetSymbol} position (${qty} contracts)`);
-          return res.json({ success: true, message: `Successfully closed ${targetSymbol} position`, orderId: orderRes.result?.orderId });
-        }
-        return res.status(400).json({ success: false, error: orderRes.retMsg || "Bybit rejected market close order", retCode: orderRes.retCode });
-      }
+      // Route every UI/manual close through TradingEngine so the exact closing
+      // order identity is preserved for reconciliation and exit audit.
       const result = await engine.manualClosePosition(targetSymbol);
       if (result.success) res.json(result);
       else sendApiError(res, 400, result.message || `Failed to close position for ${symbol}`);

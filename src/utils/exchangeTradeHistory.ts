@@ -27,7 +27,10 @@ function percent(numerator: number | null, denominator: number | null): number |
 }
 export function normalizeClosedPnlRow(row: any): NormalizedExchangeTrade {
   const symbol = typeof row?.symbol === "string" ? row.symbol : "";
-  const side = row?.side === "Buy" || row?.side === "Sell" ? row.side : null;
+  // Bybit Closed PnL side is the closing order side. Expose the original
+  // position side consistently with TradingEngine reconciliation.
+  const closingSide = row?.side === "Buy" || row?.side === "Sell" ? row.side : null;
+  const side = closingSide === "Buy" ? "Sell" : closingSide === "Sell" ? "Buy" : null;
   const filledQty = finiteOrNull(row?.closedSize) ?? finiteOrNull(row?.qty);
   const orderQty = finiteOrNull(row?.qty);
   const avgEntryPrice = finiteOrNull(row?.avgEntryPrice);
