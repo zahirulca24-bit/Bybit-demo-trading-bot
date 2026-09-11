@@ -25,6 +25,14 @@ function categoryFromRecord(record: AnyRecord | undefined): { category: ExitCate
   const orderLinkId = normalize(record.orderLinkId);
   const combined = `${stopOrderType}|${createType}`;
 
+  // Explicit bot close identities represent the actual submitted closing order
+  // and must outrank nearby/cancelled attached stop metadata.
+  if (orderLinkId.startsWith("bottrail") || orderLinkId.startsWith("apptrail")) {
+    return { category: "TRAILING", classifiedBy: "orderLinkId" };
+  }
+  if (orderLinkId.startsWith("botmanual") || orderLinkId.startsWith("appmanual")) {
+    return { category: "MANUAL", classifiedBy: "orderLinkId" };
+  }
   if (combined.includes("stoploss") || combined.includes("createbystoploss")) {
     return { category: "SL", classifiedBy: stopOrderType ? "stopOrderType" : "createType" };
   }
@@ -33,12 +41,6 @@ function categoryFromRecord(record: AnyRecord | undefined): { category: ExitCate
   }
   if (combined.includes("trailingstop") || combined.includes("createbytrailing")) {
     return { category: "TRAILING", classifiedBy: stopOrderType ? "stopOrderType" : "createType" };
-  }
-  if (orderLinkId.startsWith("bottrail") || orderLinkId.startsWith("apptrail")) {
-    return { category: "TRAILING", classifiedBy: "orderLinkId" };
-  }
-  if (orderLinkId.startsWith("botmanual") || orderLinkId.startsWith("appmanual")) {
-    return { category: "MANUAL", classifiedBy: "orderLinkId" };
   }
   return null;
 }
@@ -103,6 +105,32 @@ export function classifyClosedTradeExit(params: {
 }): ExitClassificationResult {
   const { closedTrade, executions = [], orders = [], localHistory = [] } = params;
   const closeTime = normalizeTimestampMs(closedTrade.updatedTime || closedTrade.execTime || closedTrade.createdTime || closedTrade.time);
+
+  const allCandidates = [...orders, ...executions];
+  const exactBotClose = allCandidates
+    .map((record) => ({
+      record,
+      hit: categoryFromRecord(record),
+      exactOrderId: Boolean(closedTrade.orderId && record.orderId && String(closedTrade.orderId) === String(record.orderId)),
+      exactOrderLinkId: Boolean(closedTrade.orderLinkId && record.orderLinkId && String(closedTrade.orderLinkId) === String(record.orderLinkId)),
+    }))
+    .find((item) =>
+      item.hit &&
+      (item.exactOrderId || item.exactOrderLinkId) &&
+      (item.hit.category === "TRAILING" || item.hit.category === "MANUAL")
+    );
+  if (exactBotClose?.hit) {
+    return {
+      category: exactBotClose.hit.category,
+      label: labelFor(exactBotClose.hit.category),
+      classifiedBy: `exchange.exact.${exactBotClose.hit.classifiedBy}`,
+      matchedOrderId: exactBotClose.record.orderId ? String(exactBotClose.record.orderId) : undefined,
+      matchedOrderLinkId: exactBotClose.record.orderLinkId ? String(exactBotClose.record.orderLinkId) : undefined,
+      rawStopOrderType: exactBotClose.record.stopOrderType ? String(exactBotClose.record.stopOrderType) : undefined,
+      rawCreateType: exactBotClose.record.createType ? String(exactBotClose.record.createType) : undefined,
+    };
+  }
+
   const closedTradeEvidence = categoryFromRecord(closedTrade);
   if (closedTradeEvidence) {
     return {
@@ -116,7 +144,7 @@ export function classifyClosedTradeExit(params: {
     };
   }
 
-  const candidates = [...orders, ...executions]
+  const candidates = allCandidates
     .map((record) => ({ record, score: correlationScore(closedTrade, record, closeTime), hit: categoryFromRecord(record) }))
     .filter((item) => item.score >= 30 && item.hit !== null)
     .sort((a, b) => b.score - a.score);
