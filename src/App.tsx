@@ -190,13 +190,23 @@ export default function App() {
           )}
 
           {activeTab === 'positions' && (
-            <ActiveTradesPage
-              positions={positions}
-              settings={settings}
-              tradeHistory={history}
-              onClosePosition={closePosition}
-              onRefresh={fetchData}
-            />
+            <div className="space-y-10">
+              <ActiveTradesPage
+                positions={positions}
+                settings={settings}
+                tradeHistory={history}
+                onClosePosition={closePosition}
+                onRefresh={fetchData}
+              />
+
+              <section className="pt-2 border-t border-neutral-800">
+                <HistoryPage
+                  history={history}
+                  source={historySource}
+                  metadataCoverage={historyMetadataCoverage}
+                />
+              </section>
+            </div>
           )}
 
           {activeTab === 'strategy' && (
@@ -217,8 +227,6 @@ export default function App() {
               riskProfile={riskProfile}
             />
           )}
-
-          {activeTab === 'history' && <HistoryPage history={history} source={historySource} metadataCoverage={historyMetadataCoverage} />}
 
           {activeTab === 'settings' && (
             <SettingsPage
