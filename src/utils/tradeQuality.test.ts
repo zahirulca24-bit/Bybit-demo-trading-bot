@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { classifyClosedTradeExit } from "./exitClassification";
 import { calculateAdaptiveStopPlan, calculateRiskAdjustedNotional } from "./adaptiveStop";
+import { selectClosedPnlForIntent } from "./closeReconciliation";
 
 const closedLoss = { symbol: "BTCUSDT", orderId: "c1", qty: "1", closedPnl: "-4", updatedTime: 1_800_000 };
 const closedWin = { symbol: "BTCUSDT", orderId: "c2", qty: "1", closedPnl: "8", updatedTime: 1_800_000 };
@@ -43,6 +44,24 @@ assert.equal(
   "TRAILING"
 );
 assert.equal(classifyClosedTradeExit({ closedTrade: closedLoss }).category, "OTHER", "unknown metadata must remain Unknown/Other");
+
+const staleClose = { symbol: "BTCUSDT", orderId: "old-close", orderLinkId: "bot-trail-old", updatedTime: 1_799_000 };
+const exactClose = { symbol: "BTCUSDT", orderId: "new-close", orderLinkId: "bot-trail-new", updatedTime: 1_800_100 };
+assert.equal(
+  selectClosedPnlForIntent([staleClose], { orderId: "new-close", orderLinkId: "bot-trail-new", submittedAt: 1_800_000 }),
+  null,
+  "stale latest Closed PnL row must not satisfy a pending close intent"
+);
+assert.equal(
+  selectClosedPnlForIntent([staleClose, exactClose], { orderId: "new-close", orderLinkId: "bot-trail-new", submittedAt: 1_800_000 }),
+  exactClose,
+  "exact pending close identity must be selected even when a stale row appears first"
+);
+assert.equal(
+  selectClosedPnlForIntent([staleClose], null),
+  staleClose,
+  "non-pending reconciliation may still use the latest Closed PnL row"
+);
 assert.equal(
   classifyClosedTradeExit({
     closedTrade: closedLoss,
