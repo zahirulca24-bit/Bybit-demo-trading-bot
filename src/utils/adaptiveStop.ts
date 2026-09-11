@@ -24,11 +24,11 @@ export function calculateAdaptiveStopPlan(input: {
   const { side, entryPrice, atr, swingPrice } = input;
   if (!(entryPrice > 0) || !(atr > 0)) throw new Error("Adaptive SL requires positive entry price and ATR");
 
-  const minDistancePercent = input.minDistancePercent ?? 1.0;
-  const maxDistancePercent = input.maxDistancePercent ?? 1.8;
+  const minDistancePercent = input.minDistancePercent ?? 1.5;
+  const maxDistancePercent = input.maxDistancePercent ?? 3.5;
   const atrPercent = (atr / entryPrice) * 100;
   const atrBandProgress = clamp((atrPercent - 0.30) / (1.20 - 0.30), 0, 1);
-  const atrMultiplier = 1.20 + atrBandProgress * 0.30;
+  const atrMultiplier = 2.0 + atrBandProgress * 1.0;
   const atrDistance = atr * atrMultiplier;
   const structureBuffer = atr * 0.15;
   const isLong = side === "Buy";
