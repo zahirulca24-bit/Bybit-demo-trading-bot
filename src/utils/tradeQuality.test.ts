@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { classifyClosedTradeExit } from "./exitClassification";
 import { calculateAdaptiveStopPlan, calculateRiskAdjustedNotional } from "./adaptiveStop";
 import { selectClosedPnlForIntent } from "./closeReconciliation";
+import { evaluateSmcEntryConfirmation, SmcCandle } from "./smcEntryConfirmation";
 
 const closedLoss = { symbol: "BTCUSDT", orderId: "c1", qty: "1", closedPnl: "-4", updatedTime: 1_800_000 };
 const closedWin = { symbol: "BTCUSDT", orderId: "c2", qty: "1", closedPnl: "8", updatedTime: 1_800_000 };
@@ -89,5 +90,34 @@ const quietPlan = calculateAdaptiveStopPlan({ side: "Buy", entryPrice: 100, atr:
 assert.equal(quietPlan.stopDistancePercent, 1.0, "adaptive SL must not become tighter than the legacy 1% stop");
 assert.ok(calculateRiskAdjustedNotional(500, 1.8) < 500, "wider stops must reduce notional");
 assert.equal(calculateRiskAdjustedNotional(500, 1.0), 500);
+
+const smcLongCandles: SmcCandle[] = [
+  { open: 100.0, high: 101.0, low: 99.2, close: 100.3 },
+  { open: 100.3, high: 100.9, low: 99.3, close: 100.1 },
+  { open: 100.1, high: 100.8, low: 99.1, close: 100.4 },
+  { open: 100.4, high: 101.1, low: 99.4, close: 100.2 },
+  { open: 100.2, high: 100.9, low: 99.0, close: 100.0 },
+  { open: 99.8, high: 100.2, low: 98.5, close: 99.5 },
+  { open: 99.6, high: 102.2, low: 99.5, close: 102.0 },
+  { open: 102.0, high: 102.5, low: 100.5, close: 102.2 },
+  { open: 102.2, high: 102.6, low: 101.7, close: 102.1 },
+  { open: 102.1, high: 102.3, low: 101.5, close: 101.9 },
+  { open: 101.9, high: 102.0, low: 101.2, close: 101.6 },
+  { open: 100.6, high: 101.8, low: 100.35, close: 101.6 },
+];
+const smcLong = evaluateSmcEntryConfirmation(smcLongCandles, "LONG");
+assert.equal(smcLong.confirmed, true, "long entry must require sweep + displacement MSS + FVG retest + rejection");
+assert.equal(smcLong.liquiditySweep, true);
+assert.equal(smcLong.mss, true);
+assert.equal(smcLong.fvg, true);
+assert.equal(smcLong.retest, true);
+assert.equal(smcLong.rejection, true);
+
+const noSweep = smcLongCandles.map((candle, index) => index === 5 ? { ...candle, low: 99.05, close: 99.5 } : candle);
+assert.equal(
+  evaluateSmcEntryConfirmation(noSweep, "LONG").confirmed,
+  false,
+  "no liquidity sweep must mean no SMC entry"
+);
 
 console.log("trade quality helper tests passed");
