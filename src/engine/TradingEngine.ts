@@ -273,7 +273,7 @@ export class TradingEngine {
     const swingPrice = side === "Buy"
       ? Math.min(...recent.map((c: any) => Number(c[3])))
       : Math.max(...recent.map((c: any) => Number(c[2])));
-    return calculateAdaptiveStopPlan({ side, entryPrice, atr, swingPrice, minDistancePercent: 1.0, maxDistancePercent: 1.8 });
+    return calculateAdaptiveStopPlan({ side, entryPrice, atr, swingPrice, minDistancePercent: 1.5, maxDistancePercent: 3.5 });
   }
 
   private async ensureLeverage(symbol: string) {
