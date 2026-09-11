@@ -4,6 +4,7 @@ import { WebSocketEmitter } from "./TradingEngine";
 import { TelegramNotifier } from "./TelegramNotifier";
 import { ScannedMarketItem, ScannerState } from "../types";
 import { calculateEmaTimingQuality, calculateFinalSetupScore } from "../utils/emaTimingQuality";
+import { evaluateSmcEntryConfirmation } from "../utils/smcEntryConfirmation";
 
 export interface ScannerTradeExecutor {
   getIsRunning: () => boolean;
@@ -18,7 +19,7 @@ export interface ScannerTradeExecutor {
     ema50: number,
     ema200: number,
     rsi: number,
-    quality?: { atr?: number; atrPercent?: number; oiExpansionPercent?: number; spreadPercent?: number; trendState?: string; breakoutBonus?: boolean; entryCandleDirection?: "Bullish" | "Bearish" | "Doji"; ema9?: number; ema21?: number; ema9Above21?: boolean; ema9Slope?: number; ema21Slope?: number; freshCross?: "bullish" | "bearish" | "none"; crossoverAgeCandles?: number | null; emaTimingScore?: number; finalSetupScore?: number; emaTimingState?: string; emaTimingChoppy?: boolean }
+    quality?: { atr?: number; atrPercent?: number; oiExpansionPercent?: number; spreadPercent?: number; trendState?: string; breakoutBonus?: boolean; entryCandleDirection?: "Bullish" | "Bearish" | "Doji"; ema9?: number; ema21?: number; ema9Above21?: boolean; ema9Slope?: number; ema21Slope?: number; freshCross?: "bullish" | "bearish" | "none"; crossoverAgeCandles?: number | null; emaTimingScore?: number; finalSetupScore?: number; emaTimingState?: string; emaTimingChoppy?: boolean; smcConfirmed?: boolean; liquiditySweep?: boolean; mssConfirmed?: boolean; displacementConfirmed?: boolean; fvgConfirmed?: boolean; fvgRetested?: boolean; rejectionConfirmed?: boolean; smcReason?: string; smcSweepLevel?: number | null; smcMssLevel?: number | null; smcFvgLow?: number | null; smcFvgHigh?: number | null; smcRejectionType?: "ENGULFING" | "WICK_REJECTION" | "STRONG_CLOSE" | null }
   ) => Promise<{ success: boolean; message: string; orderId?: string }>;
 }
 
@@ -183,34 +184,41 @@ export class MarketScanner {
       let signalReason = `Rejected at Gate ${Math.min(gatePassed + 1, 6)}`;
       const previousCandle = closed5m[closed5m.length - 2];
       const latestCandle = closed5m[closed5m.length - 1];
-      const previousClose = Number(previousCandle?.[4] || 0);
       const latestOpen = Number(latestCandle?.[1] || 0);
       const latestClose = Number(latestCandle?.[4] || 0);
-      const longSoftConfirmed = latestClose > previousClose && latestClose > latestOpen;
-      const shortSoftConfirmed = latestClose < previousClose && latestClose < latestOpen;
       const breakoutBonusLong = latestClose > Number(previousCandle?.[2] || 0);
       const breakoutBonusShort = latestClose < Number(previousCandle?.[3] || 0);
       const entryCandleDirection: "Bullish" | "Bearish" | "Doji" = latestClose > latestOpen ? "Bullish" : latestClose < latestOpen ? "Bearish" : "Doji";
+      const smcSide = trend15m === "Bullish HTF" ? "LONG" : trend15m === "Bearish HTF" ? "SHORT" : null;
+      const smc = smcSide
+        ? evaluateSmcEntryConfirmation(closed5m.map((k: any) => ({
+            time: Number(k[0]),
+            open: Number(k[1]),
+            high: Number(k[2]),
+            low: Number(k[3]),
+            close: Number(k[4]),
+          })), smcSide)
+        : null;
 
       let gate6FailureReason: ScannedMarketItem["gate6FailureReason"] = null;
       if (gatePassed === 5) {
         const rsiPass = trend15m === "Bullish HTF" ? currentRsi >= 50 && currentRsi <= 64 : trend15m === "Bearish HTF" ? currentRsi >= 36 && currentRsi <= 50 : false;
-        const candlePass = trend15m === "Bullish HTF" ? longSoftConfirmed : trend15m === "Bearish HTF" ? shortSoftConfirmed : false;
         if (trend15m === "Neutral HTF") gate6FailureReason = "NO_DIRECTIONAL_TREND";
-        else if (!rsiPass && !candlePass) gate6FailureReason = "RSI_AND_CANDLE_FAILED";
         else if (!rsiPass) gate6FailureReason = "RSI_OUT_OF_RANGE";
-        else if (!candlePass) gate6FailureReason = "DIRECTIONAL_CANDLE_FAILED";
+        else {
+          gatePassed = 6;
+          gate6FailureReason = null;
+        }
       }
-      if (gatePassed === 5 && trend15m === "Bullish HTF" && currentRsi >= 50 && currentRsi <= 64 && longSoftConfirmed) {
-        gatePassed = 6;
-        gate6FailureReason = null;
+
+      if (gatePassed === 6 && trend15m === "Bullish HTF" && smc?.confirmed) {
         signal = "BUY_SIGNAL";
-        signalReason = `Strict Long: RSI ${currentRsi.toFixed(1)} | bullish confirmed 5m candle${breakoutBonusLong ? " + breakout bonus" : ""} | EMA9/21 timing ${emaTiming.available ? `${emaTiming.emaTimingScore.toFixed(2)}/2` : "Unavailable"}`;
-      } else if (gatePassed === 5 && trend15m === "Bearish HTF" && currentRsi >= 36 && currentRsi <= 50 && shortSoftConfirmed) {
-        gatePassed = 6;
-        gate6FailureReason = null;
+        signalReason = `SMC Long confirmed: SSL sweep → displacement MSS → 5m FVG retest → ${smc.rejectionType || "rejection"} | RSI ${currentRsi.toFixed(1)}`;
+      } else if (gatePassed === 6 && trend15m === "Bearish HTF" && smc?.confirmed) {
         signal = "SELL_SIGNAL";
-        signalReason = `Strict Short: RSI ${currentRsi.toFixed(1)} | bearish confirmed 5m candle${breakoutBonusShort ? " + breakdown bonus" : ""} | EMA9/21 timing ${emaTiming.available ? `${emaTiming.emaTimingScore.toFixed(2)}/2` : "Unavailable"}`;
+        signalReason = `SMC Short confirmed: BSL sweep → displacement MSS → 5m FVG retest → ${smc.rejectionType || "rejection"} | RSI ${currentRsi.toFixed(1)}`;
+      } else if (gatePassed === 6 && smc) {
+        signalReason = `Base 6 gates passed; SMC entry confirmation pending: ${smc.reason}`;
       }
 
       const selectedBreakoutBonus = trend15m === "Bullish HTF" ? breakoutBonusLong : trend15m === "Bearish HTF" ? breakoutBonusShort : false;
@@ -244,6 +252,19 @@ export class MarketScanner {
         emaTimingScore: emaTiming.emaTimingScore,
         emaTimingState: emaTiming.timingState,
         emaTimingChoppy: emaTiming.choppy,
+        smcConfirmed: Boolean(smc?.confirmed),
+        liquiditySweep: Boolean(smc?.liquiditySweep),
+        mssConfirmed: Boolean(smc?.mss),
+        displacementConfirmed: Boolean(smc?.displacement),
+        fvgConfirmed: Boolean(smc?.fvg),
+        fvgRetested: Boolean(smc?.retest),
+        rejectionConfirmed: Boolean(smc?.rejection),
+        smcReason: smc?.reason,
+        smcSweepLevel: smc?.sweepLevel ?? null,
+        smcMssLevel: smc?.mssLevel ?? null,
+        smcFvgLow: smc?.fvgLow ?? null,
+        smcFvgHigh: smc?.fvgHigh ?? null,
+        smcRejectionType: smc?.rejectionType ?? null,
         finalSetupScore,
         trend: trend15m === "Bullish HTF" ? "Bullish" : trend15m === "Bearish HTF" ? "Bearish" : "Neutral",
         trend15m,
@@ -274,7 +295,7 @@ export class MarketScanner {
       }
       const side: "Buy" | "Sell" = item.signal === "SELL_SIGNAL" ? "Sell" : "Buy";
       const price = item.price || item.lastPrice;
-      this.emitter.log(`⚡ [Strict Scanner] ${side === "Buy" ? "LONG" : "SHORT"} ${item.symbol} | Slot ${this.executor.activePositions.length + 1}/${this.executor.settings?.maxPositions || 3} | RSI ${item.rsi.toFixed(1)} | EMA timing ${item.emaTimingScore?.toFixed(2) ?? "N/A"}/2 | Setup ${item.finalSetupScore?.toFixed(2) ?? "N/A"}`);
+      this.emitter.log(`⚡ [SMC Entry] ${side === "Buy" ? "LONG" : "SHORT"} ${item.symbol} | Slot ${this.executor.activePositions.length + 1}/${this.executor.settings?.maxPositions || 3} | Sweep=${Boolean(item.liquiditySweep)} MSS=${Boolean(item.mssConfirmed)} FVG=${Boolean(item.fvgConfirmed)} Retest=${Boolean(item.fvgRetested)} Reject=${item.smcRejectionType || "N/A"} | RSI ${item.rsi.toFixed(1)}`);
       const result = await this.executor.executeScannerEntry(item.symbol, side, price, item.ema50, item.ema200, item.rsi, {
         atr: item.atr,
         atrPercent: item.atrPcnt,
@@ -294,6 +315,19 @@ export class MarketScanner {
         finalSetupScore: item.finalSetupScore,
         emaTimingState: item.emaTimingState,
         emaTimingChoppy: item.emaTimingChoppy,
+        smcConfirmed: item.smcConfirmed,
+        liquiditySweep: item.liquiditySweep,
+        mssConfirmed: item.mssConfirmed,
+        displacementConfirmed: item.displacementConfirmed,
+        fvgConfirmed: item.fvgConfirmed,
+        fvgRetested: item.fvgRetested,
+        rejectionConfirmed: item.rejectionConfirmed,
+        smcReason: item.smcReason,
+        smcSweepLevel: item.smcSweepLevel,
+        smcMssLevel: item.smcMssLevel,
+        smcFvgLow: item.smcFvgLow,
+        smcFvgHigh: item.smcFvgHigh,
+        smcRejectionType: item.smcRejectionType,
       });
       if (result.success) this.telegram.sendScannerSignal(item.symbol, side === "Buy" ? "LONG" : "SHORT", price, item.rsi, item.ema9, item.ema21, item.freshCross, item.crossoverAgeCandles, item.emaTimingScore, item.finalSetupScore, true);
     }
