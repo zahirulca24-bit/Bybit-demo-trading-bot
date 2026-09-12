@@ -3,7 +3,7 @@ import { EMA, RSI, ATR } from "technicalindicators";
 import { PipelineScannedSymbol, PipelineState, PipelineGateSummary, GateResultSummary, RsiZone5m } from "../types";
 
 type Trend15m = "Bullish HTF" | "Bearish HTF" | "Neutral";
-type OiMetric = { oi: number; oiChange1h: number; timestamp: number; available: boolean };
+type OiMetric = { oi: number; oiChange15m: number; timestamp: number; available: boolean };
 
 export class SixGateFilteringPipeline {
   public state: PipelineState = {
@@ -15,7 +15,7 @@ export class SixGateFilteringPipeline {
       { gateNumber: 2, name: "15m HTF Trend Structure (EMA 50/200)", ruleDescription: "EMA direction must match and price must be on the correct side of EMA50", status: "Filtering", inputCount: 0, passCount: 0, passRatePercent: 100 },
       { gateNumber: 3, name: "Orderbook Spread", ruleDescription: "Fresh bid-ask spread <= 0.08%", status: "Filtering", inputCount: 0, passCount: 0, passRatePercent: 100 },
       { gateNumber: 4, name: "5m Volatility (ATR)", ruleDescription: "Confirmed 5m ATR between 0.30% and 1.20%", status: "Filtering", inputCount: 0, passCount: 0, passRatePercent: 100 },
-      { gateNumber: 5, name: "Open Interest (OI)", ruleDescription: "Real Bybit 1h OI expansion >= +0.50%", status: "Filtering", inputCount: 0, passCount: 0, passRatePercent: 100 },
+      { gateNumber: 5, name: "Open Interest (OI)", ruleDescription: "Real Bybit 15m OI expansion >= +0.20%", status: "Filtering", inputCount: 0, passCount: 0, passRatePercent: 100 },
       { gateNumber: 6, name: "5m RSI + Candle Confirmation", ruleDescription: "Long RSI 50-64 / Short RSI 36-50 on confirmed candle; breakout is bonus only", status: "Active", inputCount: 0, passCount: 0, passRatePercent: 100 },
     ],
     symbols: [],
@@ -29,7 +29,7 @@ export class SixGateFilteringPipeline {
   private readonly maxSpreadPercent = 0.08;
   private readonly minAtrPercent = 0.30;
   private readonly maxAtrPercent = 1.20;
-  private readonly minOiExpansionPercent = 0.50;
+  private readonly minOiExpansionPercent = 0.20;
   private readonly oiCacheMs = 3 * 60 * 1000;
 
   constructor(private bybit: RestClientV5) {}
@@ -85,7 +85,7 @@ export class SixGateFilteringPipeline {
         this.summary(2, "15m HTF Trend Structure (EMA 50/200)", "EMA direction + price side of EMA50", g1.length, g2.length),
         this.summary(3, "Orderbook Spread", "Fresh spread <= 0.08%", g2.length, g3.length),
         this.summary(4, "5m Volatility (ATR)", "Confirmed ATR 0.30%-1.20%", g3.length, g4.length),
-        this.summary(5, "Open Interest (OI)", "Real 1h OI expansion >= +0.50%", g4.length, g5.length),
+        this.summary(5, "Open Interest (OI)", "Real 15m OI expansion >= +0.20%", g4.length, g5.length),
         this.summary(6, "5m RSI + Candle Confirmation", "Long 50-64 / Short 36-50; breakout bonus only", g5.length, g6.length, g6.length > 0 ? "Active" : "Filtering"),
       ];
 
@@ -170,7 +170,7 @@ export class SixGateFilteringPipeline {
       const currentAtr = atrs[atrs.length - 1];
       const atr5mPercent = (currentAtr / confirmedPrice) * 100;
       const isAtrValid = atr5mPercent >= this.minAtrPercent && atr5mPercent <= this.maxAtrPercent;
-      const isOiValid = oi.available && oi.oiChange1h >= this.minOiExpansionPercent;
+      const isOiValid = oi.available && oi.oiChange15m >= this.minOiExpansionPercent;
 
       const currentRsi = Number(rsis[rsis.length - 1].toFixed(1));
       const latestOpen = Number(latest[1]);
@@ -199,7 +199,7 @@ export class SixGateFilteringPipeline {
       else if (!isTrend15mValid) { failedGateNumber = 2; failedGateName = "Gate 2: EMA trend / EMA50 price-side mismatch"; }
       else if (!isSpreadValid) { failedGateNumber = 3; failedGateName = "Gate 3: Spread above 0.08% or unavailable"; }
       else if (!isAtrValid) { failedGateNumber = 4; failedGateName = "Gate 4: ATR outside 0.30%-1.20%"; }
-      else if (!isOiValid) { failedGateNumber = 5; failedGateName = "Gate 5: OI expansion below +0.50% or unavailable"; }
+      else if (!isOiValid) { failedGateNumber = 5; failedGateName = "Gate 5: 15m OI expansion below +0.20% or unavailable"; }
       else if (!isRsi5mValid) { failedGateNumber = 6; failedGateName = "Gate 6: RSI/candle confirmation out of range"; }
       const passedAll = failedGateNumber === null;
 
@@ -208,7 +208,7 @@ export class SixGateFilteringPipeline {
         gate2_trend: { passed: isTrend15mValid, valueDisplay: trend15m, detail: isTrend15mValid ? "EMA50/EMA200 and price-side aligned" : "Trend or EMA50 price-side mismatch" },
         gate3_spread: { passed: isSpreadValid, valueDisplay: Number.isFinite(spreadPercent) ? `${spreadPercent.toFixed(3)}%` : "N/A", detail: isSpreadValid ? "Fresh spread <= 0.08%" : "Spread too wide/unavailable" },
         gate4_atr: { passed: isAtrValid, valueDisplay: `${atr5mPercent.toFixed(2)}%`, detail: isAtrValid ? "ATR inside 0.30%-1.20%" : "ATR outside strict band" },
-        gate5_oi: { passed: isOiValid, valueDisplay: oi.available ? `${oi.oiChange1h >= 0 ? "+" : ""}${oi.oiChange1h.toFixed(2)}%` : "N/A", detail: isOiValid ? "1h OI expansion >= +0.50%" : "OI expansion insufficient/unavailable" },
+        gate5_oi: { passed: isOiValid, valueDisplay: oi.available ? `${oi.oiChange15m >= 0 ? "+" : ""}${oi.oiChange15m.toFixed(2)}%` : "N/A", detail: isOiValid ? "15m OI expansion >= +0.20%" : "15m OI expansion insufficient/unavailable" },
         gate6_rsi: { passed: isRsi5mValid, valueDisplay: `${currentRsi.toFixed(1)} (${rsiZone5m})`, detail: isRsi5mValid ? (trend15m === "Bullish HTF" ? (breakoutLong ? "Bullish confirm + breakout bonus" : "Bullish close confirm") : (breakoutShort ? "Bearish confirm + breakdown bonus" : "Bearish close confirm")) : "RSI or directional candle confirmation failed" },
         passedAll,
         failedGateNumber,
@@ -237,7 +237,7 @@ export class SixGateFilteringPipeline {
         atr5mPercent,
         isAtrValid,
         openInterest: oi.oi,
-        oiChangePercent1h: oi.available ? oi.oiChange1h : 0,
+        oiChangePercent1h: oi.available ? oi.oiChange15m : 0,
         oiAvailable: oi.available,
         isOiValid,
         rsi14_5m: currentRsi,
@@ -264,17 +264,17 @@ export class SixGateFilteringPipeline {
     const cached = this.oiCache.get(symbol);
     if (cached && Date.now() - cached.timestamp < this.oiCacheMs) return cached;
     try {
-      const res: any = await (this.bybit as any).getOpenInterest({ category: "linear", symbol, intervalTime: "1h", limit: 2 });
+      const res: any = await (this.bybit as any).getOpenInterest({ category: "linear", symbol, intervalTime: "15min", limit: 2 });
       if (res?.retCode !== 0 || !res?.result?.list || res.result.list.length < 2) throw new Error("Insufficient OI history");
       const rows = [...res.result.list].sort((a: any, b: any) => Number(a.timestamp) - Number(b.timestamp));
       const previous = Number(rows[rows.length - 2].openInterest || 0);
       const current = Number(rows[rows.length - 1].openInterest || 0);
       if (!(previous > 0) || !(current > 0)) throw new Error("Invalid OI history");
-      const metric: OiMetric = { oi: current, oiChange1h: ((current - previous) / previous) * 100, timestamp: Date.now(), available: true };
+      const metric: OiMetric = { oi: current, oiChange15m: ((current - previous) / previous) * 100, timestamp: Date.now(), available: true };
       this.oiCache.set(symbol, metric);
       return metric;
     } catch {
-      return { oi: 0, oiChange1h: 0, timestamp: Date.now(), available: false };
+      return { oi: 0, oiChange15m: 0, timestamp: Date.now(), available: false };
     }
   }
 

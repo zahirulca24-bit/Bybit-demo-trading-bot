@@ -46,7 +46,7 @@ export class MarketScanner {
   private readonly maxSpreadPercent = 0.08;
   private readonly minAtrPercent = 0.30;
   private readonly maxAtrPercent = 1.20;
-  private readonly minOiExpansionPercent = 0.50;
+  private readonly minOiExpansionPercent = 0.20;
 
   constructor(
     private bybit: RestClientV5,
@@ -335,7 +335,7 @@ export class MarketScanner {
 
   private async getOpenInterestDelta(symbol: string): Promise<{ available: boolean; changePercent: number }> {
     try {
-      const res: any = await (this.bybit as any).getOpenInterest({ category: "linear", symbol, intervalTime: "1h", limit: 2 });
+      const res: any = await (this.bybit as any).getOpenInterest({ category: "linear", symbol, intervalTime: "15min", limit: 2 });
       if (res?.retCode !== 0 || !res?.result?.list || res.result.list.length < 2) return { available: false, changePercent: 0 };
       const rows = [...res.result.list].sort((a: any, b: any) => Number(a.timestamp) - Number(b.timestamp));
       const previous = Number(rows[rows.length - 2].openInterest || 0);
